@@ -59,7 +59,8 @@ class ContinualTrainer:
         print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} ({mode}) ---")
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs_per_task)
         scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
 
         for epoch in range(self.epochs_per_task):
@@ -100,6 +101,8 @@ class ContinualTrainer:
             epoch_loss = total_loss / total
             epoch_acc = correct / total
             time_taken = time.time() - start_time
+            
+            scheduler.step()
 
             if self.ewc_lambda > 0 and self.ewc_module.task_count > 0:
                 epoch_ewc = total_ewc / total

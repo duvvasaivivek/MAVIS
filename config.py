@@ -51,7 +51,7 @@ class AugmentationConfig:
 class TrainingConfig:
     """Training hyperparameters."""
     batch_size: int = 64
-    epochs_per_task: int = 20
+    epochs_per_task: int = 30
     learning_rate: float = 1e-3
     optimizer: str = "adam"
     mixed_precision: bool = True
@@ -91,7 +91,7 @@ class EWCConfig:
     Fisher values and old parameters are frozen reference tensors.
     """
     enabled: bool = True
-    ewc_lambda: float = 1000.0
+    ewc_lambda: float = 50000.0
     fisher_samples: int = 1000
     # Lambda sweep values for experiments
     lambda_sweep: list = field(default_factory=lambda: [10, 100, 1000, 5000])
