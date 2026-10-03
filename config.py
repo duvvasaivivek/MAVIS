@@ -8,7 +8,6 @@ Initial values from spec §47 — these are starting values, NOT final optimized
 import os
 import yaml
 from dataclasses import dataclass, field, asdict
-from typing import Optional
 
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
@@ -32,7 +31,6 @@ class DatasetConfig:
     num_classes: int = 200
     classes_per_task: int = 20
     num_tasks: int = 10
-    shuffle_buffer: int = 10000
     seed: int = 42
 
 

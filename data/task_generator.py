@@ -174,7 +174,7 @@ class TaskGenerator:
             f"Total unique classes: {len(all_classes_seen)}, expected {expected}"
         )
 
-        print(f"[TaskGen] ✓ Validation passed: {self.num_tasks} tasks, "
+        print(f"[TaskGen] [OK] Validation passed: {self.num_tasks} tasks, "
               f"{self.classes_per_task} classes/task, "
               f"{len(all_classes_seen)} unique classes, no overlap")
         return True

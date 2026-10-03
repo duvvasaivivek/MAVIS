@@ -59,8 +59,6 @@ coverage.xml
 *.onnx
 *.h5
 *.hdf5
-*.tflite
-*.pb
 *.bin
 models/saved/
 checkpoints/

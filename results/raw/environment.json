@@ -1,9 +1,13 @@
 {
-  "timestamp": "2026-09-27T12:51:41.336803",
+  "timestamp": "2026-10-03T11:41:07.285836",
   "python_version": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]",
-  "tensorflow_version": "2.10.1",
-  "gpu_devices": [],
-  "gpu_available": false,
+  "tensorflow_version": "2.10.0",
+  "gpu_devices": [
+    "/physical_device:GPU:0",
+    "/physical_device:GPU:1"
+  ],
+  "gpu_available": true,
+  "gpu_matmul_time": "17.8ms",
   "mixed_precision": "mixed_float16",
   "nvidia_gpu_info": "NVIDIA GeForce RTX 4050 Laptop GPU, 591.44, 6141 MiB"
 }

@@ -132,18 +132,6 @@ def download_tiny_imagenet(data_dir: str) -> str:
     return dataset_dir
 
 
-def download_cifar100() -> str:
-    """
-    Download CIFAR-100 via TensorFlow/Keras (for development/debugging).
-    
-    Returns:
-        String indicating CIFAR-100 is loaded via tf.keras.datasets.
-    """
-    print("[Download] CIFAR-100 will be loaded via tf.keras.datasets.cifar100")
-    print("[Download] It downloads automatically on first use (~169 MB)")
-    return "cifar100"
-
-
 def verify_dataset(data_dir: str) -> dict:
     """
     Verify dataset integrity: image count, class count, dimensions.

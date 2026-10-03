@@ -1,26 +1,5 @@
-# ─── MAVIS Requirements ──────────────────────────────────
-# Memory Augmented Visual Incremental System
-# Framework: TensorFlow + Keras | GPU: RTX 4050 (6GB)
-# ─────────────────────────────────────────────────────────
-
-# Core ML framework
-tensorflow[and-cuda]
-
-# Configuration
-pyyaml
-
-# Visualization
-matplotlib
-seaborn
-
-# Image processing
-Pillow
-
-# Progress bars
-tqdm
-
-# PDF reading (development utility)
-PyPDF2
-
-# Numerical
-numpy
+torch==2.1.2
+torchvision==0.16.2
+pyyaml==6.0
+pillow==10.2.0
+tqdm==4.66.1
