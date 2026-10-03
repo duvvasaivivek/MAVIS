@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from continual.ewc import compute_fisher, snapshot_params, compute_ewc_loss
+from continual.ewc import OnlineEWC
 
 
 class ContinualTrainer:
@@ -49,9 +49,8 @@ class ContinualTrainer:
         self.criterion = nn.CrossEntropyLoss()
         self.accuracy_matrix = []
 
-        # EWC state: accumulated Fisher and param snapshots from all past tasks
-        self.fisher_list = []
-        self.params_list = []
+        # EWC state: online EWC module
+        self.ewc_module = OnlineEWC(model=self.model, ewc_lambda=self.ewc_lambda) if self.ewc_lambda > 0 else None
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -82,10 +81,8 @@ class ContinualTrainer:
                     ce_loss = self.criterion(outputs, targets)
 
                     # Add EWC penalty if active
-                    if self.ewc_lambda > 0 and len(self.fisher_list) > 0:
-                        ewc_loss = compute_ewc_loss(
-                            self.model, self.fisher_list, self.params_list, self.ewc_lambda
-                        )
+                    if self.ewc_lambda > 0 and self.ewc_module.task_count > 0:
+                        ewc_loss = self.ewc_module.penalty(self.model)
                         loss = ce_loss + ewc_loss
                         total_ewc += ewc_loss.item() * inputs.size(0)
                     else:
@@ -104,7 +101,7 @@ class ContinualTrainer:
             epoch_acc = correct / total
             time_taken = time.time() - start_time
 
-            if self.ewc_lambda > 0 and len(self.fisher_list) > 0:
+            if self.ewc_lambda > 0 and self.ewc_module.task_count > 0:
                 epoch_ewc = total_ewc / total
                 print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
                       f"CE: {epoch_loss:.4f} | EWC: {epoch_ewc:.4f} | "
@@ -113,14 +110,11 @@ class ContinualTrainer:
                 print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
                       f"Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.4f} | Time: {time_taken:.1f}s")
 
-        # After training this task, compute Fisher and snapshot params for EWC
+        # After training this task, update Online EWC state
         if self.ewc_lambda > 0:
-            print(f"  [EWC] Computing Fisher Information ({self.fisher_samples} samples)...")
-            fisher = compute_fisher(self.model, train_loader, self.device, self.fisher_samples)
-            params = snapshot_params(self.model)
-            self.fisher_list.append(fisher)
-            self.params_list.append(params)
-            print(f"  [EWC] Stored Fisher + params for Task {task_id + 1}")
+            print(f"  [EWC] Updating Online Fisher Information ({self.fisher_samples} samples)...")
+            self.ewc_module.update(self.model, train_loader, self.device, self.fisher_samples)
+            print(f"  [EWC] Updated Fisher + params for Task {task_id + 1}")
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()

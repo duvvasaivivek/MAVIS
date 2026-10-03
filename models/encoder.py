@@ -15,10 +15,10 @@ class CNNEncoder(nn.Module):
         
         self.block1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(32, 64),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(32, 64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
             nn.Dropout2d(dropout_rate) if dropout_rate > 0 else nn.Identity()
@@ -26,10 +26,10 @@ class CNNEncoder(nn.Module):
         
         self.block2 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            nn.GroupNorm(32, 128),
             nn.ReLU(inplace=True),
             nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            nn.GroupNorm(32, 128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
             nn.Dropout2d(dropout_rate) if dropout_rate > 0 else nn.Identity()
@@ -37,10 +37,10 @@ class CNNEncoder(nn.Module):
         
         self.block3 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.GroupNorm(32, 256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.GroupNorm(32, 256),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
             nn.Dropout2d(dropout_rate) if dropout_rate > 0 else nn.Identity()
@@ -48,10 +48,10 @@ class CNNEncoder(nn.Module):
         
         self.block4 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
+            nn.GroupNorm(32, 512),
             nn.ReLU(inplace=True),
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
+            nn.GroupNorm(32, 512),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Dropout2d(dropout_rate) if dropout_rate > 0 else nn.Identity()
@@ -60,7 +60,7 @@ class CNNEncoder(nn.Module):
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(512, feature_dim),
-            nn.BatchNorm1d(feature_dim),
+            nn.LayerNorm(feature_dim),
             nn.ReLU(inplace=True)
         )
 
