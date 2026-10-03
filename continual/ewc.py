@@ -34,6 +34,7 @@ def compute_fisher(model, dataloader, device, num_samples=1000):
     fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
 
     samples_seen = 0
+    batches_seen = 0
     for inputs, targets in dataloader:
         if samples_seen >= num_samples:
             break
@@ -49,13 +50,14 @@ def compute_fisher(model, dataloader, device, num_samples=1000):
 
         for n, p in model.named_parameters():
             if p.requires_grad and p.grad is not None:
-                fisher[n] += (p.grad.detach() ** 2) * batch_size
+                fisher[n] += p.grad.detach() ** 2
 
         samples_seen += batch_size
+        batches_seen += 1
 
-    # Average over samples
+    # Average over batches
     for n in fisher:
-        fisher[n] /= samples_seen
+        fisher[n] /= batches_seen
 
     model.train()
     return fisher
