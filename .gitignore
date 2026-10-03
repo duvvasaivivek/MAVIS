@@ -1,0 +1,89 @@
+# ===========================
+# MAVIS Project .gitignore
+# ===========================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.manifest
+*.spec
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Environment Variables ---
+.env
+.env.local
+.env.*.local
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Testing ---
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# --- Model Files (large binaries) ---
+*.pt
+*.pth
+*.onnx
+*.h5
+*.hdf5
+*.tflite
+*.pb
+*.bin
+models/saved/
+checkpoints/
+
+# --- Data (large datasets) ---
+data/raw/
+data/processed/
+data/tiny-imagenet-200/
+*.zip
+*.csv
+*.parquet
+*.pkl
+*.pickle
+!data/sample/
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints/
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- Misc ---
+*.bak
+*.tmp
+*.temp
+scratch/
