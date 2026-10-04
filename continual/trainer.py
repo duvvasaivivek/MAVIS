@@ -79,6 +79,10 @@ class ContinualTrainer:
 
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
+                
+                # Offset targets to absolute class indices
+                start_cls = task_id * self.loader.task_generator.get_task(1).class_names.__len__()
+                targets = targets + start_cls
 
                 optimizer.zero_grad()
 
@@ -136,6 +140,11 @@ class ContinualTrainer:
 
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
+                    
+                    # Offset targets to absolute class indices
+                    start_cls = t * self.loader.task_generator.get_task(1).class_names.__len__()
+                    targets = targets + start_cls
+                    
                     with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
                         outputs = self.model(inputs)
                     _, predicted = outputs.max(1)

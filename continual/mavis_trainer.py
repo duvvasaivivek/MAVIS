@@ -63,14 +63,16 @@ class MAVISTrainer:
                 optimizer.zero_grad()
 
                 with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
+                    # Offset targets to absolute class indices
+                    start_cls = task_id * self.model.memory_bank.classes_per_task
+                    end_cls = start_cls + self.model.memory_bank.classes_per_task
+                    targets = targets + start_cls
+
                     # Pass task_id so model only retrieves PAST memories
                     logits = self.model(inputs, task_id=task_id)
                     
                     # Task Masking (Zero out gradients for non-current classes)
-                    start_cls = task_id * self.model.memory_bank.classes_per_task
-                    end_cls = start_cls + self.model.memory_bank.classes_per_task
-                    
-                    mask = torch.full_like(logits, float('-inf'))
+                    mask = torch.full_like(logits, -1e9) # Use -1e9 instead of -inf to avoid AMP NaN
                     mask[:, start_cls:end_cls] = logits[:, start_cls:end_cls]
                     
                     loss = self.criterion(mask, targets)
@@ -112,6 +114,10 @@ class MAVISTrainer:
 
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
+                    # Offset targets to absolute class indices
+                    start_cls = t * self.model.memory_bank.classes_per_task
+                    targets = targets + start_cls
+                    
                     with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
                         # No task_id passed during evaluation (Model retrieves all memories)
                         logits = self.model(inputs)
