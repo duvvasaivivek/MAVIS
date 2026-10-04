@@ -59,7 +59,7 @@ class ContinualTrainer:
         print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} ({mode}) ---")
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
-        optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer, 
             max_lr=self.learning_rate, 

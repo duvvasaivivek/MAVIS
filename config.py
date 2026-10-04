@@ -51,7 +51,7 @@ class AugmentationConfig:
 class TrainingConfig:
     """Training hyperparameters."""
     batch_size: int = 256
-    epochs_per_task: int = 50
+    epochs_per_task: int = 100
     learning_rate: float = 0.005
     optimizer: str = "adam"
     mixed_precision: bool = True
@@ -68,7 +68,7 @@ class EncoderConfig:
     # Channel counts per block — reduce if GPU OOM
     channels: list = field(default_factory=lambda: [64, 128, 256, 512])
     use_batch_norm: bool = True
-    dropout_rate: float = 0.0
+    dropout_rate: float = 0.5
 
 
 @dataclass
