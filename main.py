@@ -188,13 +188,71 @@ def train_ewc(config: MAVISConfig):
     print(f"\n[EWC] Saved metrics to {res_path}")
 
 
+def train_mavis(config: MAVISConfig):
+    """
+    Phase 4 & 5: MAVIS Complete Architecture.
+    Uses the external Neural Memory Bank and Multi-Head Attention.
+    """
+    from data.tiny_imagenet import TinyImageNetLoader
+    from models.mavis import MAVIS
+    from continual.mavis_trainer import MAVISTrainer
+
+    print("\n" + "=" * 60)
+    print("Phase 4 & 5: Training MAVIS (Memory + Attention)")
+    print("=" * 60)
+
+    device = setup_environment(config)
+
+    task_gen = TaskGenerator(
+        data_dir=config.dataset.data_dir,
+        num_tasks=config.dataset.num_tasks,
+        classes_per_task=config.dataset.classes_per_task,
+        seed=config.dataset.seed
+    )
+    loader = TinyImageNetLoader(
+        data_dir=config.dataset.data_dir,
+        task_generator=task_gen,
+        batch_size=config.training.batch_size,
+        num_workers=2,
+        aug_config=config.augmentation
+    )
+
+    model = MAVIS(config)
+
+    trainer = MAVISTrainer(
+        model=model,
+        loader=loader,
+        task_gen=task_gen,
+        learning_rate=config.training.learning_rate,
+        epochs_per_task=config.training.epochs_per_task,
+        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", "mavis"),
+        device=device
+    )
+
+    for task_id in range(config.dataset.num_tasks):
+        trainer.train_task(task_id)
+        trainer.evaluate_all_tasks(task_id)
+        forgetting = trainer.compute_forgetting()
+        print(f"  -> Average Forgetting so far: {forgetting:.4f}")
+
+    final_res = {
+        "final_accuracy_matrix": trainer.accuracy_matrix,
+        "final_forgetting": trainer.compute_forgetting()
+    }
+    res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
+    os.makedirs(os.path.dirname(res_path), exist_ok=True)
+    with open(res_path, "w") as f:
+        json.dump(final_res, f, indent=2)
+    print(f"\n[MAVIS] Saved metrics to {res_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MAVIS -- Memory Augmented Visual Incremental System"
     )
     parser.add_argument(
         "command",
-        choices=["setup", "verify", "visualize", "config", "train_baseline", "train_ewc"],
+        choices=["setup", "verify", "visualize", "config", "train_baseline", "train_ewc", "train_mavis"],
         help="Command to run",
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
@@ -217,6 +275,8 @@ def main():
         train_baseline(config)
     elif args.command == "train_ewc":
         train_ewc(config)
+    elif args.command == "train_mavis":
+        train_mavis(config)
 
 
 if __name__ == "__main__":
