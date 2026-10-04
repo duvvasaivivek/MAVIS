@@ -47,24 +47,24 @@ class CNNEncoder(nn.Module):
     """
     def __init__(self, feature_dim: int = 512, dropout_rate: float = 0.0):
         super(CNNEncoder, self).__init__()
-        self.in_planes = 64
+        self.in_planes = 128
 
         # Initial layer: 3x3 conv instead of 7x7 to preserve 64x64 spatial resolution
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(32, 64)
+        self.conv1 = nn.Conv2d(3, 128, kernel_size=3, stride=1, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(32, 128)
         self.relu = nn.ReLU(inplace=True)
         # No initial MaxPool to preserve spatial dimensions
 
-        self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1, dropout_rate=dropout_rate)
-        self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2, dropout_rate=dropout_rate)
-        self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2, dropout_rate=dropout_rate)
-        self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer1 = self._make_layer(BasicBlock, 128, 2, stride=1, dropout_rate=dropout_rate)
+        self.layer2 = self._make_layer(BasicBlock, 256, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer3 = self._make_layer(BasicBlock, 512, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer4 = self._make_layer(BasicBlock, 1024, 2, stride=2, dropout_rate=dropout_rate)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(512 * BasicBlock.expansion, feature_dim),
+            nn.Linear(1024 * BasicBlock.expansion, feature_dim),
             nn.LayerNorm(feature_dim),
             nn.ReLU(inplace=True)
         )

@@ -46,7 +46,7 @@ class ContinualTrainer:
         self.ewc_lambda = ewc_lambda
         self.fisher_samples = fisher_samples
 
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.accuracy_matrix = []
 
         # EWC state: online EWC module
@@ -60,7 +60,12 @@ class ContinualTrainer:
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
         optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs_per_task)
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=self.learning_rate, 
+            steps_per_epoch=len(train_loader), 
+            epochs=self.epochs_per_task
+        )
         scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
 
         for epoch in range(self.epochs_per_task):
@@ -92,6 +97,7 @@ class ContinualTrainer:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+                scheduler.step()
 
                 total_loss += ce_loss.item() * inputs.size(0)
                 _, predicted = outputs.max(1)
@@ -101,8 +107,6 @@ class ContinualTrainer:
             epoch_loss = total_loss / total
             epoch_acc = correct / total
             time_taken = time.time() - start_time
-            
-            scheduler.step()
 
             if self.ewc_lambda > 0 and self.ewc_module.task_count > 0:
                 epoch_ewc = total_ewc / total
