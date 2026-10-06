@@ -39,24 +39,30 @@ class ManualMultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key, value):
-        B, T_q, C = query.size()
-        _, T_k, _ = key.size()
+        # CRITICAL FIX: Force FP32 to prevent PyTorch from trying to compile Triton FP16 TensorCore kernels
+        with torch.amp.autocast('cuda', enabled=False):
+            query = query.float()
+            key = key.float()
+            value = value.float()
 
-        # Linear projections
-        q = self.q_proj(query).view(B, T_q, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T_q, hd]
-        k = self.k_proj(key).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)    # [B, H, T_k, hd]
-        v = self.v_proj(value).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T_k, hd]
+            B, T_q, C = query.size()
+            _, T_k, _ = key.size()
 
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)            # [B, H, T_q, T_k]
-        attn = F.softmax(scores, dim=-1)
-        attn = self.dropout(attn)
+            # Linear projections
+            q = self.q_proj(query).view(B, T_q, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T_q, hd]
+            k = self.k_proj(key).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)    # [B, H, T_k, hd]
+            v = self.v_proj(value).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T_k, hd]
 
-        # Apply attention to values
-        out = torch.matmul(attn, v)  # [B, H, T_q, hd]
-        out = out.transpose(1, 2).contiguous().view(B, T_q, C)  # [B, T_q, C]
+            # Scaled dot-product attention
+            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)            # [B, H, T_q, T_k]
+            attn = F.softmax(scores, dim=-1)
+            attn = self.dropout(attn)
 
-        return self.out_proj(out), attn
+            # Apply attention to values
+            out = torch.matmul(attn, v)  # [B, H, T_q, hd]
+            out = out.transpose(1, 2).contiguous().view(B, T_q, C)  # [B, T_q, C]
+
+            return self.out_proj(out), attn
 
 
 class MemoryAttention(nn.Module):
