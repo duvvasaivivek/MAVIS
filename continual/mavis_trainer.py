@@ -71,11 +71,12 @@ class MAVISTrainer:
                     # Pass task_id so model only retrieves PAST memories
                     logits = self.model(inputs, task_id=task_id)
                     
-                    # Task Masking (Zero out gradients for non-current classes)
-                    mask = torch.full_like(logits, -1e9) # Use -1e9 instead of -inf to avoid AMP NaN
-                    mask[:, start_cls:end_cls] = logits[:, start_cls:end_cls]
+                    # Task Masking (Only compute loss on the neurons active for this task)
+                    # This is much safer than filling with -1e9 and avoids all AMP edge cases.
+                    active_logits = logits[:, start_cls:end_cls]
                     
-                    loss = self.criterion(mask, targets)
+                    # targets are absolute (e.g. 20-39), so we subtract start_cls to make them 0-19 for the loss function
+                    loss = self.criterion(active_logits, targets - start_cls)
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
