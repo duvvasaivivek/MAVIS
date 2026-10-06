@@ -51,8 +51,8 @@ class AugmentationConfig:
 class TrainingConfig:
     """Training hyperparameters."""
     batch_size: int = 256
-    epochs_per_task: int = 100
-    learning_rate: float = 0.005
+    epochs_per_task: int = 50
+    learning_rate: float = 0.01
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42

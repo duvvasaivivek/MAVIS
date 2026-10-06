@@ -57,9 +57,13 @@ class MemoryAttention(nn.Module):
 
         # Reshape for MHA: query=[B,1,D], key/value=[B,N,D]
         query = current_features.unsqueeze(1)                      # [B, 1, D]
-        kv = memory_prototypes.unsqueeze(0).expand(batch_size, -1, -1).contiguous()  # [B, N, D]
+        # Use .repeat() instead of .expand() to prevent C++ SDPA backend segfaults on zero-stride tensors
+        kv = memory_prototypes.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, N, D]
 
-        attn_output, _ = self.mha(query, kv, kv)  # [B, 1, D]
+        # Force PyTorch to use the pre-compiled Math backend to avoid Triton JIT Compiler errors (missing gcc)
+        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+            attn_output, _ = self.mha(query, kv, kv)  # [B, 1, D]
+            
         attn_output = attn_output.squeeze(1)       # [B, D]
 
         return self.layer_norm(attn_output)
