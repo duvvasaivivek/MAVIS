@@ -218,7 +218,7 @@ def train_mavis(config: MAVISConfig):
         data_dir=config.dataset.data_dir,
         task_generator=task_gen,
         batch_size=config.training.batch_size,
-        num_workers=8,
+        num_workers=2,  # Reverted to 2 to prevent HPC networked drive (NFS) thrashing
         aug_config=config.augmentation
     )
 
