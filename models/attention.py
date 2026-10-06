@@ -57,7 +57,7 @@ class MemoryAttention(nn.Module):
 
         # Reshape for MHA: query=[B,1,D], key/value=[B,N,D]
         query = current_features.unsqueeze(1)                      # [B, 1, D]
-        kv = memory_prototypes.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, D]
+        kv = memory_prototypes.unsqueeze(0).expand(batch_size, -1, -1).contiguous()  # [B, N, D]
 
         attn_output, _ = self.mha(query, kv, kv)  # [B, 1, D]
         attn_output = attn_output.squeeze(1)       # [B, D]
