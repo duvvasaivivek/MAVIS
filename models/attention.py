@@ -39,8 +39,9 @@ class ManualMultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key, value):
-        # CRITICAL FIX: Force FP32 to prevent PyTorch from trying to compile Triton FP16 TensorCore kernels
+        # CRITICAL HPC FIX: Force FP32 to prevent PyTorch from trying to compile Triton FP16 TensorCore kernels
         with torch.amp.autocast('cuda', enabled=False):
+            orig_dtype = query.dtype
             query = query.float()
             key = key.float()
             value = value.float()
@@ -53,16 +54,31 @@ class ManualMultiHeadAttention(nn.Module):
             k = self.k_proj(key).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)    # [B, H, T_k, hd]
             v = self.v_proj(value).view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T_k, hd]
 
-            # Scaled dot-product attention
-            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)            # [B, H, T_q, T_k]
-            attn = F.softmax(scores, dim=-1)
-            attn = self.dropout(attn)
+            # CRITICAL HPC FIX: 
+            # 4D torch.matmul triggers the Triton C++ compiler on PyTorch 2.14.
+            # By reshaping to 3D and using torch.bmm, we force PyTorch to use pre-compiled cuBLAS.
+            q_3d = q.reshape(B * self.num_heads, T_q, self.head_dim)
+            k_3d = k.reshape(B * self.num_heads, T_k, self.head_dim).transpose(1, 2)
+            v_3d = v.reshape(B * self.num_heads, T_k, self.head_dim)
 
-            # Apply attention to values
-            out = torch.matmul(attn, v)  # [B, H, T_q, hd]
+            # Scaled dot-product attention (3D bmm)
+            scores_3d = torch.bmm(q_3d, k_3d) / math.sqrt(self.head_dim)  # [B*H, T_q, T_k]
+            attn_3d = F.softmax(scores_3d, dim=-1)
+            attn_3d = self.dropout(attn_3d)
+
+            # Apply attention to values (3D bmm)
+            out_3d = torch.bmm(attn_3d, v_3d)  # [B*H, T_q, hd]
+            
+            # Reshape back to 4D
+            out = out_3d.reshape(B, self.num_heads, T_q, self.head_dim)
+
+            # Final linear projection
             out = out.transpose(1, 2).contiguous().view(B, T_q, C)  # [B, T_q, C]
 
-            return self.out_proj(out), attn
+            # Restore original dtype
+            out = out.to(orig_dtype)
+
+            return self.out_proj(out), attn_3d.reshape(B, self.num_heads, T_q, T_k)
 
 
 class MemoryAttention(nn.Module):
