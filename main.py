@@ -42,6 +42,11 @@ def setup_environment(config: MAVISConfig):
         print("  [WARN] No GPU found. Running on CPU.")
         device = "cpu"
 
+    # 1.5 Enable cuDNN benchmarking for faster convolutions
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        print("  [OK] cuDNN benchmark enabled for max speed")
+
     # 2. Check/Download Dataset
     if not os.path.exists(config.dataset.data_dir):
         print(f"  [!!] Dataset not found at {config.dataset.data_dir}.")
@@ -213,7 +218,7 @@ def train_mavis(config: MAVISConfig):
         data_dir=config.dataset.data_dir,
         task_generator=task_gen,
         batch_size=config.training.batch_size,
-        num_workers=2,
+        num_workers=8,
         aug_config=config.augmentation
     )
 
