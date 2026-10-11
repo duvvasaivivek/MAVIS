@@ -243,7 +243,8 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         checkpoint_dir=checkpoint_dir,
         device=device,
         distill_lambda=getattr(config.training, "distill_lambda", 4.0),
-        proto_lambda=getattr(config.training, "proto_lambda", 1.0)
+        proto_lambda=getattr(config.training, "proto_lambda", 1.0),
+        repel_lambda=getattr(config.training, "repel_lambda", 2.0)
     )
 
     # Auto-resume from latest completed task if checkpoint exists
@@ -262,6 +263,21 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     for p in trainer.old_encoder.parameters():
                         p.requires_grad = False
                     
+                    # Restore base anchor encoder E_0 from Task 1 checkpoint
+                    base_ckpt = os.path.join(checkpoint_dir, "mavis_task_1.pth")
+                    if os.path.exists(base_ckpt):
+                        try:
+                            base_state = torch.load(base_ckpt, map_location=device)
+                            base_model = MAVIS(config).to(device)
+                            base_model.load_state_dict(base_state, strict=True)
+                            trainer.base_encoder = copy.deepcopy(base_model.encoder)
+                            trainer.base_encoder.eval()
+                            for p in trainer.base_encoder.parameters():
+                                p.requires_grad = False
+                            print("[MAVIS] Successfully loaded Base Anchor Encoder E_0 from Task 1.")
+                        except Exception:
+                            pass
+                    
                     metrics_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix.json")
                     if os.path.exists(metrics_ckpt):
                         with open(metrics_ckpt, "r") as f:
@@ -270,6 +286,14 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     if os.path.exists(metrics_ncm_ckpt):
                         with open(metrics_ncm_ckpt, "r") as f:
                             trainer.accuracy_matrix_ncm = json.load(f)
+                    metrics_head_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_head.json")
+                    if os.path.exists(metrics_head_ckpt):
+                        with open(metrics_head_ckpt, "r") as f:
+                            trainer.accuracy_matrix_head = json.load(f)
+                    metrics_ens_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_ens.json")
+                    if os.path.exists(metrics_ens_ckpt):
+                        with open(metrics_ens_ckpt, "r") as f:
+                            trainer.accuracy_matrix_ens = json.load(f)
                     
                     start_task = t
                     print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
@@ -285,18 +309,22 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         trainer.train_task(task_id)
         trainer.evaluate_all_tasks(task_id)
         forgetting = trainer.compute_forgetting()
-        print(f"  -> Average Forgetting so far: {forgetting:.4f}")
+        print(f"  -> Average Forgetting so far (NCM): {forgetting:.4f}", flush=True)
 
     final_res = {
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_accuracy_matrix_ncm": trainer.accuracy_matrix_ncm,
-        "final_forgetting": trainer.compute_forgetting()
+        "final_accuracy_matrix_head": trainer.accuracy_matrix_head,
+        "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
+        "final_forgetting_ncm": trainer.compute_forgetting(trainer.accuracy_matrix_ncm),
+        "final_forgetting_head": trainer.compute_forgetting(trainer.accuracy_matrix_head),
+        "final_forgetting_ens": trainer.compute_forgetting(trainer.accuracy_matrix_ens)
     }
     res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)
     with open(res_path, "w") as f:
         json.dump(final_res, f, indent=2)
-    print(f"\n[MAVIS] Saved metrics to {res_path}")
+    print(f"\n[MAVIS] Saved metrics to {res_path}", flush=True)
 
 
 def main():

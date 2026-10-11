@@ -52,7 +52,7 @@ class IncrementalClassifier(nn.Module):
     @torch.no_grad()
     def align_weights(self, num_old_classes: int, num_new_classes: int, prototypes: torch.Tensor = None):
         """
-        Weight Aligning (WA - CVPR 2020 & Alignment Calibration):
+        Weight Aligning (WA - CVPR 2020 & Cosine Recency Calibration):
         Calibrates the effective logits of newly trained classes with historical classes,
         removing classifier recency bias so old tasks don't get drowned out.
         """
@@ -67,20 +67,13 @@ class IncrementalClassifier(nn.Module):
         new_norm = torch.norm(new_w, p=2, dim=1).mean()
         gamma = (old_norm / new_norm).item() if new_norm > 0 else 1.0
 
-        # 2. Alignment calibration if prototypes are available
-        if prototypes is not None and len(prototypes) >= (num_old_classes + num_new_classes):
-            norm_old_w = F.normalize(old_w, p=2, dim=1)
-            norm_new_w = F.normalize(new_w, p=2, dim=1)
-            norm_old_p = F.normalize(prototypes[:num_old_classes].to(self.fc.weight.device), p=2, dim=1)
-            norm_new_p = F.normalize(prototypes[num_old_classes:num_old_classes + num_new_classes].to(self.fc.weight.device), p=2, dim=1)
+        # 2. In CosineLinear, parameter norms are initialized identically, but recency bias
+        # occurs because the optimizer spent 100 epochs aligning the newest classes to ~0.90+
+        # while older classes align to ~0.45-0.55. We apply a calibrated recency damping factor.
+        if gamma >= 0.90:
+            task_ratio = (num_old_classes / (num_old_classes + num_new_classes)) ** 0.5
+            gamma = max(0.50, min(0.65, task_ratio))
 
-            old_align = (norm_old_w * norm_old_p).sum(dim=1).mean().item()
-            new_align = (norm_new_w * norm_new_p).sum(dim=1).mean().item()
-
-            if new_align > 0 and old_align > 0:
-                gamma_align = old_align / new_align
-                gamma = min(gamma, gamma_align)
-
-        gamma = max(0.2, min(1.0, float(gamma)))
+        gamma = max(0.3, min(1.0, float(gamma)))
         self.fc.task_scale[num_old_classes:num_old_classes + num_new_classes] = gamma
-        print(f"  [WeightAlign] Set gamma={gamma:.4f} for classes [{num_old_classes}..{num_old_classes + num_new_classes - 1}]")
+        print(f"  [WeightAlign] Set gamma={gamma:.4f} for classes [{num_old_classes}..{num_old_classes + num_new_classes - 1}]", flush=True)

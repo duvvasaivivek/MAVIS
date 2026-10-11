@@ -56,9 +56,10 @@ class TrainingConfig:
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
-    # Continual Learning loss weights (Lever 4)
+    # Continual Learning loss weights (Lever 4 & Cross-Task Repulsion)
     distill_lambda: float = 4.0
     proto_lambda: float = 1.0
+    repel_lambda: float = 2.0
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2

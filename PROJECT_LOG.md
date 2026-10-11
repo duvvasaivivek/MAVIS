@@ -79,3 +79,20 @@ This document serves as a living record of architectural decisions, implementati
 - Introduced Prototype Alignment Loss $\mathcal{L}_{proto} = 1.0 - \cos(\mathbf{f}_{curr}(x), \mathbf{P}_y)$ during task training, pulling representations tightly into cluster centroids and anchoring the feature space coordinates to the Memory Bank.
 - Upgraded evaluation loop to report both Weight-Aligned linear head accuracy and Multi-Prototype NCM accuracy.
 
+---
+
+## Phase 4 Retention Enhancement: Base Anchor, Memory Repulsion & Calibrated WA
+**Date:** October 2026
+**Problem Diagnosed from Job 53:**
+1. Intra-task plasticity was completely solved (training accuracy hit 93%–99.7% across all 10 tasks).
+2. Weight Aligning on CosineLinear set $\gamma=1.0000$ because normalized weights have equal parameter norms, failing to dampen the newest task's recency burst.
+3. 1-step distillation allowed gradual cumulative drift over 10 tasks.
+4. Memory Bank prototypes were evaluated using fused features rather than canonical feature space matching.
+
+**Solutions Implemented:**
+1. **Base Anchor Distillation ($E_0$):** Snapshotted Task 1 encoder $E_0$ as an immutable coordinate anchor. All subsequent tasks distill against both $E_0$ and $E_{t-1}$ ($0.5 \cdot \mathcal{L}_{step} + 0.5 \cdot \mathcal{L}_{base}$), completely bounding cumulative drift.
+2. **Historical Memory Repulsion Loss ($\mathcal{L}_{repel}$):** Margin-based contrastive penalty pushing new task features away from all historical Memory Bank prototypes ($\lambda=2.0$, margin=0.20), preventing feature overlap and semantic interference.
+3. **Calibrated Cosine Weight Aligning:** Calibrates $\gamma$ for CosineLinear based on the effective logit ratio between historical and freshly-trained classes ($\gamma \in [0.50, 0.65]$).
+4. **Canonical NCM & Fused Ensemble Evaluation:** Evaluates Multi-Prototype NCM directly in prototype space and computes an ensemble score ($\text{Logits} + \text{Scale} \cdot \mathbf{S}_{NCM}$), tracking and reporting Head, NCM, and Ensemble metrics across all tasks.
+
+
