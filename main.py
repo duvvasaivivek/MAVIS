@@ -21,6 +21,12 @@ import os
 import json
 import argparse
 import torch
+import torch.multiprocessing as mp
+
+try:
+    mp.set_sharing_strategy('file_system')
+except Exception:
+    pass
 
 # Project imports
 from config import get_default_config, MAVISConfig, PROJECT_ROOT, CONFIGS_DIR, RESULTS_DIR
@@ -227,17 +233,40 @@ def train_mavis(config: MAVISConfig):
 
     model = MAVIS(config)
 
+    checkpoint_dir = os.path.join(RESULTS_DIR, "checkpoints", "mavis")
     trainer = MAVISTrainer(
         model=model,
         loader=loader,
         task_gen=task_gen,
         learning_rate=config.training.learning_rate,
         epochs_per_task=config.training.epochs_per_task,
-        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", "mavis"),
+        checkpoint_dir=checkpoint_dir,
         device=device
     )
 
-    for task_id in range(config.dataset.num_tasks):
+    # Auto-resume from latest completed task if checkpoint exists
+    import copy
+    start_task = 0
+    for t in range(config.dataset.num_tasks, 0, -1):
+        ckpt_path = os.path.join(checkpoint_dir, f"mavis_task_{t}.pth")
+        if os.path.exists(ckpt_path):
+            print(f"\n[MAVIS] Found checkpoint for completed Task {t} at {ckpt_path}. Loading state...")
+            model.load_state_dict(torch.load(ckpt_path, map_location=device))
+            trainer.old_encoder = copy.deepcopy(model.encoder)
+            trainer.old_encoder.eval()
+            for p in trainer.old_encoder.parameters():
+                p.requires_grad = False
+            
+            metrics_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix.json")
+            if os.path.exists(metrics_ckpt):
+                with open(metrics_ckpt, "r") as f:
+                    trainer.accuracy_matrix = json.load(f)
+            
+            start_task = t
+            print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
+            break
+
+    for task_id in range(start_task, config.dataset.num_tasks):
         trainer.train_task(task_id)
         trainer.evaluate_all_tasks(task_id)
         forgetting = trainer.compute_forgetting()

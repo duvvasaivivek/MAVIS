@@ -65,16 +65,37 @@ class TinyImageNetLoader:
     def get_task_train_dataloader(self, task_id: int) -> DataLoader:
         class_list = self.task_generator.get_task(task_id + 1).class_names
         dataset = TinyImageNetTaskDataset(self.data_dir, class_list, split='train', transform=self.train_transform)
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size, 
+            shuffle=True, 
+            num_workers=self.num_workers, 
+            pin_memory=True,
+            persistent_workers=(self.num_workers > 0)
+        )
 
     def get_task_val_dataloader(self, task_id: int) -> DataLoader:
         class_list = self.task_generator.get_task(task_id + 1).class_names
         dataset = TinyImageNetTaskDataset(self.data_dir, class_list, split='val', transform=self.eval_transform)
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+        # num_workers=0 for validation avoids multiprocessing IPC semaphore leaks in Python 3.14
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False, 
+            num_workers=0, 
+            pin_memory=True
+        )
 
     def get_cumulative_val_dataloader(self, up_to_task: int) -> DataLoader:
         cumulative_classes = []
         for t in range(up_to_task + 1):
             cumulative_classes.extend(self.task_generator.get_task(t + 1).class_names)
         dataset = TinyImageNetTaskDataset(self.data_dir, cumulative_classes, split='val', transform=self.eval_transform)
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+        # num_workers=0 for validation avoids multiprocessing IPC semaphore leaks in Python 3.14
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False, 
+            num_workers=0, 
+            pin_memory=True
+        )

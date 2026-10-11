@@ -170,9 +170,13 @@ class MAVISTrainer:
 
         self.accuracy_matrix.append(task_accuracies)
 
-        # Save checkpoint
+        # Save checkpoint (model weights + accuracy history)
         ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_task_{current_task_id+1}.pth")
         torch.save(self.model.state_dict(), ckpt_path)
+        metrics_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix.json")
+        import json
+        with open(metrics_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix, f, indent=2)
 
     def compute_forgetting(self):
         """Compute average forgetting across all completed tasks."""
