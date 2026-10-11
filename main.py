@@ -296,7 +296,33 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                             trainer.accuracy_matrix_ens = json.load(f)
                     
                     start_task = t
-                    print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
+                    if start_task >= config.dataset.num_tasks:
+                        print(f"\n[MAVIS] All {config.dataset.num_tasks} tasks already completed in {checkpoint_dir}.")
+                        print(f"[MAVIS] Archiving previous completed run and auto-starting fresh training run from Task 1.\n", flush=True)
+                        import shutil, datetime
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        archive_dir = f"{checkpoint_dir}_completed_{timestamp}"
+                        try:
+                            shutil.copytree(checkpoint_dir, archive_dir)
+                            for fname in os.listdir(checkpoint_dir):
+                                fpath = os.path.join(checkpoint_dir, fname)
+                                if os.path.isfile(fpath):
+                                    os.remove(fpath)
+                            print(f"[MAVIS] Successfully archived previous checkpoints to {archive_dir}.\n", flush=True)
+                        except Exception as e:
+                            print(f"[MAVIS] Note on archiving: {e}\n", flush=True)
+                        start_task = 0
+                        trainer.old_encoder = None
+                        trainer.base_encoder = None
+                        trainer.accuracy_matrix = []
+                        trainer.accuracy_matrix_ncm = []
+                        trainer.accuracy_matrix_head = []
+                        trainer.accuracy_matrix_ens = []
+                        model = MAVIS(config).to(device)
+                        trainer.model = model
+                        break
+
+                    print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n", flush=True)
                     break
                 except RuntimeError as e:
                     print(f"[MAVIS] Checkpoint {ckpt_path} was saved from an older architecture and is incompatible:")
