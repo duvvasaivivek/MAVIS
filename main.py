@@ -3,7 +3,7 @@ import io
 import os
 os.environ["TRITON_DISABLE"] = "1"  # CRITICAL: Completely disable Triton to prevent C++ compiler crashes on HPC
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 """
 MAVIS -- Memory Augmented Visual Incremental System (PyTorch)

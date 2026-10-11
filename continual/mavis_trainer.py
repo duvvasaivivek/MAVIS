@@ -42,7 +42,7 @@ class MAVISTrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     def train_task(self, task_id: int):
-        print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} (MAVIS) ---")
+        print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} (MAVIS) ---", flush=True)
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
         # AdamW optimizer and OneCycleLR scheduler
@@ -127,13 +127,13 @@ class MAVISTrainer:
             time_taken = time.time() - start_time
 
             print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
-                  f"Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.4f} | Time: {time_taken:.1f}s")
+                  f"Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
 
         # 2. Phase 4: Save Prototypes into Memory Bank (Multi-Prototype K-Means, Lever 1)
-        print(f"  [MAVIS] Committing features for Task {task_id + 1} to Memory Bank (K={self.model.memory_bank.prototypes_per_class})...")
+        print(f"  [MAVIS] Committing features for Task {task_id + 1} to Memory Bank (K={self.model.memory_bank.prototypes_per_class})...", flush=True)
         # Note: We pass the train_loader so prototypes are built ONLY from training data (No Leakage)
         self.model.memory_bank.update_memory(task_id, train_loader, self.model.encoder, self.device)
-        print(f"  [MAVIS] Memory successfully locked.")
+        print(f"  [MAVIS] Memory successfully locked.", flush=True)
 
         # Lever 2: Balance Classifier Head via Weight Aligning (WA - CVPR 2020)
         num_old_classes = task_id * self.model.memory_bank.classes_per_task
@@ -152,7 +152,7 @@ class MAVISTrainer:
         self.model.eval()
         task_accuracies = []
         task_ncm_accuracies = []
-        print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...")
+        print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...", flush=True)
 
         with torch.no_grad():
             for t in range(current_task_id + 1):
@@ -191,9 +191,9 @@ class MAVISTrainer:
                 if total > 0:
                     ncm_acc = correct_ncm / total
                     task_ncm_accuracies.append(ncm_acc)
-                    print(f"  -> Task {t+1} Accuracy: {acc:.4f} (WA Head) | NCM: {ncm_acc:.4f} (Memory)")
+                    print(f"  -> Task {t+1} Accuracy: {acc:.4f} (WA Head) | NCM: {ncm_acc:.4f} (Memory)", flush=True)
                 else:
-                    print(f"  -> Task {t+1} Accuracy: {acc:.4f}")
+                    print(f"  -> Task {t+1} Accuracy: {acc:.4f}", flush=True)
 
         self.accuracy_matrix.append(task_accuracies)
         self.accuracy_matrix_ncm.append(task_ncm_accuracies)
