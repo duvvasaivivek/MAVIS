@@ -50,8 +50,9 @@ class MAVIS(nn.Module):
         # 1. Encoder (same Wide ResNet-18 used in Phases 2 & 3)
         self.encoder = CNNEncoder(feature_dim=feature_dim, dropout_rate=dropout_rate)
 
-        # 2. Memory Bank (frozen prototype storage — NOT trained)
-        self.memory_bank = MemoryBank(feature_dim, num_tasks, classes_per_task)
+        # 2. Memory Bank (frozen multi-prototype storage — NOT trained)
+        prototypes_per_class = getattr(config.memory, "prototypes_per_class", 3)
+        self.memory_bank = MemoryBank(feature_dim, num_tasks, classes_per_task, prototypes_per_class=prototypes_per_class)
 
         # 3. Attention retrieval
         self.attention = MemoryAttention(feature_dim, num_heads=num_heads, dropout=0.1)

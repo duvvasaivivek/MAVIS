@@ -56,6 +56,9 @@ class TrainingConfig:
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
+    # Continual Learning loss weights (Lever 4)
+    distill_lambda: float = 4.0
+    proto_lambda: float = 1.0
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2
@@ -107,6 +110,7 @@ class MemoryConfig:
     """
     capacity: int = 500
     feature_dim: int = 512
+    prototypes_per_class: int = 3  # K=3 sub-clusters per class (Lever 1)
     strategy: str = "adaptive"  # "adaptive", "random", "fifo"
     # Importance scoring weights
     novelty_weight: float = 1.0

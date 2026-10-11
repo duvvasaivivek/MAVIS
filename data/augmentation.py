@@ -9,7 +9,7 @@ import torchvision.transforms as transforms
 def get_train_transforms(config):
     transform_list = []
     
-    # PIL image transforms
+    # PIL image transforms calibrated for 64x64 Tiny ImageNet
     if config.random_crop_padding > 0:
         transform_list.append(transforms.RandomCrop(64, padding=config.random_crop_padding))
     if config.random_flip_horizontal:
@@ -22,13 +22,11 @@ def get_train_transforms(config):
             hue=config.color_jitter_factor/2
         ))
         
-    # Apply ImageNet learned AutoAugment policy for maximum generalization
-    transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET))
     transform_list.append(transforms.ToTensor())
     
-    # Random Erasing (forces network to learn whole object, not just parts)
-    if getattr(config, 'random_erasing', True):
-        transform_list.append(transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0))
+    # Gentle Random Erasing if enabled (p=0.2 with small patch scale to preserve 64x64 object details)
+    if getattr(config, 'random_erasing', False):
+        transform_list.append(transforms.RandomErasing(p=0.2, scale=(0.02, 0.20), ratio=(0.3, 3.3), value=0))
     
     # ImageNet standard normalization
     transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], 

@@ -54,5 +54,28 @@ This document serves as a living record of architectural decisions, implementati
 
 ---
 
-## Next Steps
-- **Phase 3:** Implement Elastic Weight Consolidation (EWC) to defend against the catastrophic forgetting measured in Phase 2. This will involve computing the Fisher Information Matrix over the training data and applying an L2 penalty on critical weights.
+## Phase 4 Optimization: Intra-Task Plasticity & Inter-Task Stability Levers
+**Goal:** Boost both individual task accuracies (training & validation: 72% -> 85%+) and continual memory retention across all tasks (raising retention from ~30% to 50%+).
+
+### 1. Lever 1: Multi-Prototype Memory Bank (K-Means Clustering)
+- **Files:** `models/memory.py`, `models/mavis.py`
+- Replaced single-prototype averaging per class with pure PyTorch K-Means clustering ($K=3$ prototypes per class).
+- Memory Bank tensor shape expanded to `[num_tasks, classes_per_task, K, feature_dim]`.
+- Implemented `compute_ncm_scores()` using maximum cosine similarity over the $K$ sub-cluster prototypes per class for fine-grained multi-modal representation matching.
+
+### 2. Lever 2: Balanced Classifier Head via Weight Aligning (WA - CVPR 2020)
+- **Files:** `models/classifier.py`, `continual/mavis_trainer.py`
+- Added `task_scale` buffer in `CosineLinear` and implemented `align_weights()` in `IncrementalClassifier`.
+- Calibrates new class weights against historical class weights using norm ratios and prototype alignment ratios to eliminate the classifier recency bias.
+
+### 3. Lever 3: Calibrated Augmentations for 64×64 Tiny ImageNet
+- **File:** `data/augmentation.py`
+- Removed harsh 224×224 ImageNet `AutoAugment` policy and lowered `RandomErasing` probability to `0.2` with smaller erase scale `(0.02, 0.20)`.
+- Preserved `RandomCrop(64, padding=4)` and `RandomHorizontalFlip()`, preventing visual artifact destruction on 64×64 resolution.
+
+### 4. Lever 4: Multi-Step Distillation Anchoring & Prototype Alignment Loss
+- **Files:** `continual/mavis_trainer.py`, `config.py`, `main.py`
+- Increased representation distillation weight $\lambda_{distill}$ to `4.0` to counter cumulative drift across sequential tasks.
+- Introduced Prototype Alignment Loss $\mathcal{L}_{proto} = 1.0 - \cos(\mathbf{f}_{curr}(x), \mathbf{P}_y)$ during task training, pulling representations tightly into cluster centroids and anchoring the feature space coordinates to the Memory Bank.
+- Upgraded evaluation loop to report both Weight-Aligned linear head accuracy and Multi-Prototype NCM accuracy.
+

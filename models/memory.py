@@ -1,19 +1,8 @@
 """
-Neural Memory Bank (Phase 4)
-==============================
-Stores frozen prototype features for each class in each completed task.
-
-DATA LEAKAGE PREVENTION:
-  - Prototypes are computed from TRAINING data only (never validation data).
-  - Prototypes are computed AFTER training on that task completes (post-hoc).
-  - Prototypes use eval-mode encoder with no_grad (no augmentation influence).
-  - Memory is a registered buffer (frozen by design, never touched by backprop).
-  - get_past_memories(task_id) returns ONLY tasks 0..task_id-1 (never the current task).
-
-OVERFITTING PREVENTION:
-  - Prototypes are L2-normalized to a unit sphere (prevents magnitude explosion).
-  - Each prototype is the MEAN of all samples for that class (smooths out noise).
-  - Memory is never trained — it is purely a frozen lookup table.
+Neural Memory Bank (Phase 4 & 5)
+================================
+Stores frozen multi-prototype features for each class in each completed task.
+Uses K-Means clustering (K=3) to preserve multi-modal visual class distributions.
 """
 
 import torch
@@ -21,19 +10,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def kmeans_prototypes(features: torch.Tensor, k: int = 3, num_iters: int = 10) -> torch.Tensor:
+    """
+    Computes k prototype cluster centroids for a class feature set using pure PyTorch.
+    Returns normalized centroids [k, D].
+    """
+    N, D = features.size()
+    if N <= k:
+        norm_f = F.normalize(features, p=2, dim=1)
+        if N < k:
+            repeat_factor = (k + N - 1) // N
+            norm_f = norm_f.repeat(repeat_factor, 1)[:k]
+        return norm_f
+
+    # K-Means++ style spread out initialization
+    indices = torch.linspace(0, N - 1, steps=k).long()
+    centroids = features[indices].clone()
+
+    for _ in range(num_iters):
+        dists = torch.cdist(features, centroids)
+        cluster_assignments = dists.argmin(dim=1)
+
+        new_centroids = []
+        for i in range(k):
+            mask = (cluster_assignments == i)
+            if mask.any():
+                new_centroids.append(features[mask].mean(dim=0))
+            else:
+                new_centroids.append(centroids[i])
+        centroids = torch.stack(new_centroids, dim=0)
+
+    return F.normalize(centroids, p=2, dim=1)
+
+
 class MemoryBank(nn.Module):
     """
-    Fixed-size memory storing one prototype per class per task.
-    Shape: [num_tasks, classes_per_task, feature_dim]
+    Multi-Prototype Memory Bank storing K prototypes per class per task.
+    Shape: [num_tasks, classes_per_task, prototypes_per_class, feature_dim]
     """
-    def __init__(self, feature_dim: int, num_tasks: int, classes_per_task: int):
+    def __init__(self, feature_dim: int, num_tasks: int, classes_per_task: int, prototypes_per_class: int = 3):
         super().__init__()
         self.feature_dim = feature_dim
         self.num_tasks = num_tasks
         self.classes_per_task = classes_per_task
+        self.prototypes_per_class = prototypes_per_class
 
         # Registered buffers: saved with model state_dict but NOT trained by optimizer
-        self.register_buffer("memory", torch.zeros(num_tasks, classes_per_task, feature_dim))
+        self.register_buffer("memory", torch.zeros(num_tasks, classes_per_task, prototypes_per_class, feature_dim))
         self.register_buffer("is_populated", torch.zeros(num_tasks, dtype=torch.bool))
 
         # Online running prototypes for the current active task during training
@@ -62,43 +85,43 @@ class MemoryBank(nn.Module):
         self.running_prototypes.zero_()
         self.running_counts.zero_()
 
+    def get_current_task_prototypes(self):
+        """
+        Returns normalized running prototypes for the active task [classes_per_task, D].
+        """
+        valid_running = []
+        for c in range(self.classes_per_task):
+            if self.running_counts[c] > 0:
+                valid_running.append(F.normalize(self.running_prototypes[c], p=2, dim=0))
+            else:
+                valid_running.append(torch.zeros(self.feature_dim, device=self.memory.device))
+        return torch.stack(valid_running, dim=0).to(self.memory.device)
+
     @torch.no_grad()
     def update_memory(self, task_id: int, train_loader, encoder, device):
         """
-        Compute and store the mean feature prototype for each class in this task.
-
-        CRITICAL: This uses the TRAINING dataloader (not validation) and runs
-        the encoder in eval mode with no_grad to get clean, deterministic features.
-        The eval-mode encoder uses NO augmentation because the train_loader's
-        transforms include augmentation, but we process features through
-        the deterministic forward pass of the encoder (Dropout disabled in eval mode,
-        GroupNorm uses learned parameters deterministically).
+        Compute and store K feature prototypes for each class in this task using K-Means.
         """
         encoder.eval()
-        class_sums = torch.zeros(self.classes_per_task, self.feature_dim, device='cpu')
-        class_counts = torch.zeros(self.classes_per_task, device='cpu')
+        class_features = [[] for _ in range(self.classes_per_task)]
 
         for inputs, targets in train_loader:
             inputs = inputs.to(device)
-            # targets are already 0-indexed within the task (0..classes_per_task-1)
-            # because TinyImageNetTaskDataset uses class_idx as the target
 
             with torch.amp.autocast('cuda', enabled=(device == 'cuda')):
                 features = encoder(inputs)
 
-            # Accumulate on CPU to avoid GPU memory pressure
             features_cpu = features.float().cpu()
             for i in range(len(targets)):
                 c = targets[i].item()
-                class_sums[c] += features_cpu[i]
-                class_counts[c] += 1
+                class_features[c].append(features_cpu[i])
 
-        # Compute mean prototype per class and L2-normalize
+        # Compute K prototypes per class using K-Means clustering
         for c in range(self.classes_per_task):
-            if class_counts[c] > 0:
-                proto = class_sums[c] / class_counts[c]
-                proto = F.normalize(proto, p=2, dim=0)
-                self.memory[task_id, c] = proto.to(self.memory.device)
+            if len(class_features[c]) > 0:
+                c_feats = torch.stack(class_features[c], dim=0)
+                protos_k = kmeans_prototypes(c_feats, k=self.prototypes_per_class, num_iters=10)
+                self.memory[task_id, c] = protos_k.to(self.memory.device)
 
         self.is_populated[task_id] = True
         self.reset_running_prototypes()
@@ -106,12 +129,11 @@ class MemoryBank(nn.Module):
 
     def get_past_memories(self, current_task_id: int):
         """
-        Returns prototypes from tasks 0..current_task_id-1 ONLY.
+        Returns prototypes from tasks 0..current_task_id-1 ONLY, flattened to [N * K, D].
         """
         if current_task_id <= 0:
             return None
 
-        # Collect only tasks that are (a) populated AND (b) strictly before current_task_id
         valid_indices = []
         for t in range(current_task_id):
             if self.is_populated[t]:
@@ -126,20 +148,13 @@ class MemoryBank(nn.Module):
     def get_training_memories(self, current_task_id: int):
         """
         Returns all memories available during training:
-        1. Frozen locked prototypes from all completed past tasks (0..current_task_id-1)
-        2. Normalized running prototypes from the current active task (if available)
+        1. Frozen locked prototypes from all completed past tasks
+        2. Normalized running prototypes from the current active task
         """
         past = self.get_past_memories(current_task_id)
 
         if self.running_counts.sum() > 0:
-            valid_running = []
-            for c in range(self.classes_per_task):
-                if self.running_counts[c] > 0:
-                    valid_running.append(F.normalize(self.running_prototypes[c], p=2, dim=0))
-                else:
-                    valid_running.append(torch.zeros(self.feature_dim, device=self.memory.device))
-            curr = torch.stack(valid_running, dim=0).to(self.memory.device)
-
+            curr = self.get_current_task_prototypes()
             if past is not None:
                 return torch.cat([past, curr], dim=0)
             else:
@@ -149,9 +164,55 @@ class MemoryBank(nn.Module):
 
     def get_all_populated_memories(self):
         """
-        Returns ALL populated prototypes. Used ONLY during evaluation (never training).
+        Returns ALL populated prototypes flattened to [num_seen_classes * K, D].
         """
         valid_tasks = self.is_populated.nonzero(as_tuple=True)[0]
         if len(valid_tasks) == 0:
             return None
         return self.memory[valid_tasks].reshape(-1, self.feature_dim)
+
+    def get_mean_class_prototypes(self, up_to_task_id: int = None):
+        """
+        Returns the mean prototype for each class [num_seen_classes, feature_dim].
+        Useful for alignment calibration and global distance monitoring.
+        """
+        valid_tasks = self.is_populated.nonzero(as_tuple=True)[0]
+        if len(valid_tasks) == 0:
+            return None
+        if up_to_task_id is not None:
+            valid_tasks = valid_tasks[valid_tasks <= up_to_task_id]
+            if len(valid_tasks) == 0:
+                return None
+        mean_protos = self.memory[valid_tasks].mean(dim=2)
+        return mean_protos.reshape(-1, self.feature_dim)
+
+    def compute_ncm_scores(self, features: torch.Tensor, up_to_task_id: int = None):
+        """
+        Multi-Prototype Nearest Class Mean classification.
+        Computes cosine similarity between query features and all populated prototypes,
+        taking the max similarity over the K prototypes for each class.
+
+        Args:
+            features: [B, D] query features
+            up_to_task_id: optional int limit
+        Returns:
+            class_scores: [B, num_seen_classes]
+        """
+        valid_tasks = self.is_populated.nonzero(as_tuple=True)[0]
+        if len(valid_tasks) == 0:
+            return None
+
+        if up_to_task_id is not None:
+            valid_tasks = valid_tasks[valid_tasks <= up_to_task_id]
+            if len(valid_tasks) == 0:
+                return None
+
+        num_tasks = len(valid_tasks)
+        num_classes = num_tasks * self.classes_per_task
+        protos = self.memory[valid_tasks].view(num_classes * self.prototypes_per_class, self.feature_dim)
+
+        norm_f = F.normalize(features, p=2, dim=1)
+        sim = F.linear(norm_f, protos)
+        sim = sim.view(-1, num_classes, self.prototypes_per_class)
+        class_scores, _ = sim.max(dim=2)
+        return class_scores

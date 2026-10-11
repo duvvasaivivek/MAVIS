@@ -241,7 +241,9 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         learning_rate=config.training.learning_rate,
         epochs_per_task=config.training.epochs_per_task,
         checkpoint_dir=checkpoint_dir,
-        device=device
+        device=device,
+        distill_lambda=getattr(config.training, "distill_lambda", 4.0),
+        proto_lambda=getattr(config.training, "proto_lambda", 1.0)
     )
 
     # Auto-resume from latest completed task if checkpoint exists
@@ -264,6 +266,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     if os.path.exists(metrics_ckpt):
                         with open(metrics_ckpt, "r") as f:
                             trainer.accuracy_matrix = json.load(f)
+                    metrics_ncm_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_ncm.json")
+                    if os.path.exists(metrics_ncm_ckpt):
+                        with open(metrics_ncm_ckpt, "r") as f:
+                            trainer.accuracy_matrix_ncm = json.load(f)
                     
                     start_task = t
                     print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
@@ -283,6 +289,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
 
     final_res = {
         "final_accuracy_matrix": trainer.accuracy_matrix,
+        "final_accuracy_matrix_ncm": trainer.accuracy_matrix_ncm,
         "final_forgetting": trainer.compute_forgetting()
     }
     res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
