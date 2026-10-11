@@ -5,18 +5,21 @@ The Continual Learning training loop specifically designed for Phase 4 & 5.
 """
 
 import os
+import copy
 import time
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 
 class MAVISTrainer:
     """
-    Trains the complete MAVIS architecture.
+    Trains the complete MAVIS architecture with Cosine Linear classification,
+    representation-preserving feature distillation, and Memory Attention retrieval.
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None):
+                 checkpoint_dir, device=None, distill_lambda: float = 2.0):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -28,6 +31,8 @@ class MAVISTrainer:
         self.learning_rate = learning_rate
         self.epochs_per_task = epochs_per_task
         self.checkpoint_dir = checkpoint_dir
+        self.distill_lambda = distill_lambda
+        self.old_encoder = None
 
         self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.accuracy_matrix = []
@@ -38,7 +43,7 @@ class MAVISTrainer:
         print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} (MAVIS) ---")
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
-        # Same optimizer and scheduler as Phase 3 (proven to hit 77% peak)
+        # AdamW optimizer and OneCycleLR scheduler
         optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer, 
@@ -68,15 +73,28 @@ class MAVISTrainer:
                     end_cls = start_cls + self.model.memory_bank.classes_per_task
                     targets = targets + start_cls
 
-                    # Pass task_id so model only retrieves PAST memories
-                    logits = self.model(inputs, task_id=task_id)
+                    # Pass task_id so model retrieves past memories + current running prototypes
+                    logits, current_features, fused_features = self.model(
+                        inputs, task_id=task_id, return_features=True
+                    )
                     
-                    # Task Masking (Only compute loss on the neurons active for this task)
-                    # This is much safer than filling with -1e9 and avoids all AMP edge cases.
+                    # Update online running prototypes for active task (no grad)
+                    self.model.memory_bank.update_running_prototypes(
+                        current_features, targets - start_cls
+                    )
+
+                    # Task Masking (Only compute CE loss on the neurons active for this task)
                     active_logits = logits[:, start_cls:end_cls]
-                    
-                    # targets are absolute (e.g. 20-39), so we subtract start_cls to make them 0-19 for the loss function
-                    loss = self.criterion(active_logits, targets - start_cls)
+                    loss_ce = self.criterion(active_logits, targets - start_cls)
+
+                    # Less-Forget representation distillation loss
+                    if self.old_encoder is not None:
+                        with torch.no_grad():
+                            old_features = self.old_encoder(inputs)
+                        loss_distill = (1.0 - F.cosine_similarity(current_features, old_features, dim=-1)).mean()
+                        loss = loss_ce + self.distill_lambda * loss_distill
+                    else:
+                        loss = loss_ce
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -96,21 +114,29 @@ class MAVISTrainer:
             print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
                   f"Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.4f} | Time: {time_taken:.1f}s")
 
-        # 2. Phase 4 Magic: Save Prototypes into Memory Bank
+        # 2. Phase 4: Save Prototypes into Memory Bank
         print(f"  [MAVIS] Committing features for Task {task_id + 1} to Memory Bank...")
         # Note: We pass the train_loader so prototypes are built ONLY from training data (No Leakage)
         self.model.memory_bank.update_memory(task_id, train_loader, self.model.encoder, self.device)
         print(f"  [MAVIS] Memory successfully locked.")
 
+        # 3. Snapshot encoder for next task representation preservation
+        self.old_encoder = copy.deepcopy(self.model.encoder)
+        self.old_encoder.eval()
+        for p in self.old_encoder.parameters():
+            p.requires_grad = False
+
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()
         task_accuracies = []
+        all_prototypes = self.model.memory_bank.get_all_populated_memories()
         print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...")
 
         with torch.no_grad():
             for t in range(current_task_id + 1):
                 val_loader = self.loader.get_task_val_dataloader(t)
                 correct = 0
+                correct_ncm = 0
                 total = 0
 
                 for inputs, targets in val_loader:
@@ -121,15 +147,26 @@ class MAVISTrainer:
                     
                     with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
                         # No task_id passed during evaluation (Model retrieves all memories)
-                        logits = self.model(inputs)
+                        logits, current_features, fused_features = self.model(
+                            inputs, return_features=True
+                        )
                         
                     _, predicted = logits.max(1)
                     total += targets.size(0)
                     correct += predicted.eq(targets).sum().item()
 
+                    if all_prototypes is not None:
+                        ncm_scores = F.linear(F.normalize(fused_features, p=2, dim=1), all_prototypes)
+                        _, ncm_pred = ncm_scores.max(1)
+                        correct_ncm += ncm_pred.eq(targets).sum().item()
+
                 acc = correct / total if total > 0 else 0.0
                 task_accuracies.append(acc)
-                print(f"  -> Task {t+1} Accuracy: {acc:.4f}")
+                if all_prototypes is not None and total > 0:
+                    ncm_acc = correct_ncm / total
+                    print(f"  -> Task {t+1} Accuracy: {acc:.4f} (NCM: {ncm_acc:.4f})")
+                else:
+                    print(f"  -> Task {t+1} Accuracy: {acc:.4f}")
 
         self.accuracy_matrix.append(task_accuracies)
 

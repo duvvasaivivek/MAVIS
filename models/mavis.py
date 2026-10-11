@@ -63,36 +63,40 @@ class MAVIS(nn.Module):
             nn.Linear(feature_dim * 2, feature_dim),
             nn.Sigmoid()
         )
+        # Initialize gate weights and bias to 0 so initial gate is exactly 0.5 (balanced 50/50)
+        nn.init.zeros_(self.fusion_gate[0].weight)
+        nn.init.zeros_(self.fusion_gate[0].bias)
 
-        # 5. Classifier (same single-layer head used in Phases 2 & 3)
+        # 5. Classifier (balanced CosineLinear head)
         self.classifier = IncrementalClassifier(feature_dim=feature_dim, total_classes=total_classes)
 
-    def forward(self, x, task_id=None):
+    def forward(self, x, task_id=None, return_features=False):
         """
         Args:
             x: input images [B, 3, 64, 64]
             task_id: (int or None)
                 - During TRAINING: pass the current task_id.
-                  Memory retrieval uses tasks 0..task_id-1 only.
+                  Memory retrieval uses tasks 0..task_id-1 plus running prototypes for task_id.
                 - During EVALUATION: pass None.
-                  Memory retrieval uses all populated tasks.
+                  Memory retrieval uses all locked memories.
+            return_features: bool, whether to return encoder and fused features
 
         Returns:
-            logits: [B, 200] — raw logits for all 200 classes.
-                    Task masking (if needed) is done externally in the trainer.
+            logits: [B, 200]
+            (optional) current_features, fused_features
         """
         # 1. Extract current features
         current_features = self.encoder(x)
 
-        # 2. Retrieve past features from memory
+        # 2. Retrieve past/active features from memory
         if task_id is not None:
-            # TRAINING: only retrieve from completed past tasks (DATA LEAKAGE PREVENTION)
-            past_memories = self.memory_bank.get_past_memories(task_id)
+            # TRAINING: retrieve from past completed tasks + current task running prototypes
+            memories = self.memory_bank.get_training_memories(task_id)
         else:
-            # EVALUATION: retrieve from everything stored so far
-            past_memories = self.memory_bank.get_all_populated_memories()
+            # EVALUATION: retrieve from all locked populated memories
+            memories = self.memory_bank.get_all_populated_memories()
 
-        retrieved_features = self.attention(current_features, past_memories)
+        retrieved_features = self.attention(current_features, memories)
 
         # 3. Gated Fusion
         concat = torch.cat([current_features, retrieved_features], dim=1)  # [B, 2*D]
@@ -102,4 +106,6 @@ class MAVIS(nn.Module):
         # 4. Classify from fused features
         logits = self.classifier(fused_features)
 
+        if return_features:
+            return logits, current_features, fused_features
         return logits

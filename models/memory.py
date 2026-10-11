@@ -36,6 +36,32 @@ class MemoryBank(nn.Module):
         self.register_buffer("memory", torch.zeros(num_tasks, classes_per_task, feature_dim))
         self.register_buffer("is_populated", torch.zeros(num_tasks, dtype=torch.bool))
 
+        # Online running prototypes for the current active task during training
+        self.register_buffer("running_prototypes", torch.zeros(classes_per_task, feature_dim))
+        self.register_buffer("running_counts", torch.zeros(classes_per_task))
+
+    @torch.no_grad()
+    def update_running_prototypes(self, features: torch.Tensor, targets: torch.Tensor):
+        """
+        Online update of current task's prototypes during training so that
+        Memory Attention has valid targets to attend to from Epoch 1.
+        """
+        features_d = features.detach().float()
+        for c in range(self.classes_per_task):
+            mask = (targets == c)
+            if mask.any():
+                batch_mean = features_d[mask].mean(dim=0)
+                if self.running_counts[c] == 0:
+                    self.running_prototypes[c] = batch_mean
+                else:
+                    self.running_prototypes[c] = 0.9 * self.running_prototypes[c] + 0.1 * batch_mean
+                self.running_counts[c] += 1
+
+    def reset_running_prototypes(self):
+        """Resets running buffers at task transitions."""
+        self.running_prototypes.zero_()
+        self.running_counts.zero_()
+
     @torch.no_grad()
     def update_memory(self, task_id: int, train_loader, encoder, device):
         """
@@ -72,23 +98,15 @@ class MemoryBank(nn.Module):
             if class_counts[c] > 0:
                 proto = class_sums[c] / class_counts[c]
                 proto = F.normalize(proto, p=2, dim=0)
-                self.memory[task_id, c] = proto
+                self.memory[task_id, c] = proto.to(self.memory.device)
 
         self.is_populated[task_id] = True
+        self.reset_running_prototypes()
         encoder.train()
 
     def get_past_memories(self, current_task_id: int):
         """
         Returns prototypes from tasks 0..current_task_id-1 ONLY.
-
-        DATA LEAKAGE PREVENTION:
-          - During training on task T, the model must NOT see task T's own
-            prototypes (they are being learned right now).
-          - It may only retrieve memories from tasks that are fully completed.
-
-        Returns:
-            Tensor of shape [N, feature_dim] where N = populated_past_tasks * classes_per_task
-            or None if no past tasks exist.
         """
         if current_task_id <= 0:
             return None
@@ -104,6 +122,30 @@ class MemoryBank(nn.Module):
 
         indices = torch.tensor(valid_indices, device=self.memory.device)
         return self.memory[indices].reshape(-1, self.feature_dim)
+
+    def get_training_memories(self, current_task_id: int):
+        """
+        Returns all memories available during training:
+        1. Frozen locked prototypes from all completed past tasks (0..current_task_id-1)
+        2. Normalized running prototypes from the current active task (if available)
+        """
+        past = self.get_past_memories(current_task_id)
+
+        if self.running_counts.sum() > 0:
+            valid_running = []
+            for c in range(self.classes_per_task):
+                if self.running_counts[c] > 0:
+                    valid_running.append(F.normalize(self.running_prototypes[c], p=2, dim=0))
+                else:
+                    valid_running.append(torch.zeros(self.feature_dim, device=self.memory.device))
+            curr = torch.stack(valid_running, dim=0).to(self.memory.device)
+
+            if past is not None:
+                return torch.cat([past, curr], dim=0)
+            else:
+                return curr
+        else:
+            return past
 
     def get_all_populated_memories(self):
         """
