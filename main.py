@@ -202,7 +202,7 @@ def train_ewc(config: MAVISConfig):
     print(f"\n[EWC] Saved metrics to {res_path}")
 
 
-def train_mavis(config: MAVISConfig):
+def train_mavis(config: MAVISConfig, resume: bool = True):
     """
     Phase 4 & 5: MAVIS Complete Architecture.
     Uses the external Neural Memory Bank and Multi-Head Attention.
@@ -247,24 +247,33 @@ def train_mavis(config: MAVISConfig):
     # Auto-resume from latest completed task if checkpoint exists
     import copy
     start_task = 0
-    for t in range(config.dataset.num_tasks, 0, -1):
-        ckpt_path = os.path.join(checkpoint_dir, f"mavis_task_{t}.pth")
-        if os.path.exists(ckpt_path):
-            print(f"\n[MAVIS] Found checkpoint for completed Task {t} at {ckpt_path}. Loading state...")
-            model.load_state_dict(torch.load(ckpt_path, map_location=device))
-            trainer.old_encoder = copy.deepcopy(model.encoder)
-            trainer.old_encoder.eval()
-            for p in trainer.old_encoder.parameters():
-                p.requires_grad = False
-            
-            metrics_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix.json")
-            if os.path.exists(metrics_ckpt):
-                with open(metrics_ckpt, "r") as f:
-                    trainer.accuracy_matrix = json.load(f)
-            
-            start_task = t
-            print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
-            break
+    if resume:
+        for t in range(config.dataset.num_tasks, 0, -1):
+            ckpt_path = os.path.join(checkpoint_dir, f"mavis_task_{t}.pth")
+            if os.path.exists(ckpt_path):
+                print(f"\n[MAVIS] Found checkpoint for completed Task {t} at {ckpt_path}. Checking compatibility...")
+                try:
+                    state_dict = torch.load(ckpt_path, map_location=device)
+                    model.load_state_dict(state_dict, strict=True)
+                    trainer.old_encoder = copy.deepcopy(model.encoder)
+                    trainer.old_encoder.eval()
+                    for p in trainer.old_encoder.parameters():
+                        p.requires_grad = False
+                    
+                    metrics_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix.json")
+                    if os.path.exists(metrics_ckpt):
+                        with open(metrics_ckpt, "r") as f:
+                            trainer.accuracy_matrix = json.load(f)
+                    
+                    start_task = t
+                    print(f"[MAVIS] Successfully resumed! Continuing from Task {start_task + 1}...\n")
+                    break
+                except RuntimeError as e:
+                    print(f"[MAVIS] Checkpoint {ckpt_path} was saved from an older architecture and is incompatible:")
+                    print(f"        {e}")
+                    print(f"[MAVIS] Starting a clean training run from Task 1.\n")
+                    start_task = 0
+                    break
 
     for task_id in range(start_task, config.dataset.num_tasks):
         trainer.train_task(task_id)
@@ -293,6 +302,7 @@ def main():
         help="Command to run",
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
+    parser.add_argument("--fresh", action="store_true", help="Start training fresh from Task 1 even if checkpoints exist")
     args = parser.parse_args()
 
     # Load config
@@ -313,7 +323,7 @@ def main():
     elif args.command == "train_ewc":
         train_ewc(config)
     elif args.command == "train_mavis":
-        train_mavis(config)
+        train_mavis(config, resume=not args.fresh)
 
 
 if __name__ == "__main__":
