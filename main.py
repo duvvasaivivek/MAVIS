@@ -23,10 +23,7 @@ import argparse
 import torch
 import torch.multiprocessing as mp
 
-try:
-    mp.set_sharing_strategy('file_system')
-except Exception:
-    pass
+# In-process data loading with RAM caching eliminates all Python 3.14 multiprocessing / sem_unlink bugs
 
 # Project imports
 from config import get_default_config, MAVISConfig, PROJECT_ROOT, CONFIGS_DIR, RESULTS_DIR
@@ -97,7 +94,7 @@ def train_baseline(config: MAVISConfig):
         data_dir=config.dataset.data_dir,
         task_generator=task_gen,
         batch_size=config.training.batch_size,
-        num_workers=2,
+        num_workers=0,
         aug_config=config.augmentation
     )
 
@@ -162,7 +159,7 @@ def train_ewc(config: MAVISConfig):
         data_dir=config.dataset.data_dir,
         task_generator=task_gen,
         batch_size=config.training.batch_size,
-        num_workers=2,
+        num_workers=0,
         aug_config=config.augmentation
     )
 
@@ -227,7 +224,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         data_dir=config.dataset.data_dir,
         task_generator=task_gen,
         batch_size=config.training.batch_size,
-        num_workers=2,  # Reverted to 2 to prevent HPC networked drive (NFS) thrashing
+        num_workers=0,  # num_workers=0 with RAM caching eliminates multiprocessing IPC crashes in Python 3.14
         aug_config=config.augmentation
     )
 

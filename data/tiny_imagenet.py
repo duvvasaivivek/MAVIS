@@ -38,14 +38,25 @@ class TinyImageNetTaskDataset(Dataset):
                 if img_name.endswith('.JPEG'):
                     self.samples.append((os.path.join(img_dir, img_name), class_idx))
 
+        # RAM Preloading: 10,000 64x64 images take only ~120 MB RAM.
+        # Preloading completely eliminates disk I/O bottlenecks and Python 3.14 IPC crashes.
+        self.cached_images = []
+        for path, _ in self.samples:
+            with open(path, 'rb') as f:
+                img = Image.open(f).convert('RGB')
+            self.cached_images.append(img)
+
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, target = self.samples[idx]
-        # Open as RGB
-        with open(path, 'rb') as f:
-            img = Image.open(f).convert('RGB')
+        if self.cached_images:
+            img = self.cached_images[idx]
+            target = self.samples[idx][1]
+        else:
+            path, target = self.samples[idx]
+            with open(path, 'rb') as f:
+                img = Image.open(f).convert('RGB')
             
         if self.transform is not None:
             img = self.transform(img)
@@ -54,30 +65,29 @@ class TinyImageNetTaskDataset(Dataset):
 
 class TinyImageNetLoader:
     """Manages PyTorch DataLoaders for Continual Learning tasks."""
-    def __init__(self, data_dir: str, task_generator: TaskGenerator, batch_size: int, num_workers: int = 4, aug_config=None):
+    def __init__(self, data_dir: str, task_generator: TaskGenerator, batch_size: int, num_workers: int = 0, aug_config=None):
         self.data_dir = data_dir
         self.task_generator = task_generator
         self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.num_workers = 0  # CRITICAL: num_workers=0 completely eliminates Python 3.14 multiprocessing / sem_unlink bugs
         self.train_transform = get_train_transforms(aug_config) if aug_config else get_eval_transforms()
         self.eval_transform = get_eval_transforms()
 
     def get_task_train_dataloader(self, task_id: int) -> DataLoader:
         class_list = self.task_generator.get_task(task_id + 1).class_names
         dataset = TinyImageNetTaskDataset(self.data_dir, class_list, split='train', transform=self.train_transform)
+        # In-process DataLoader is blazing fast with RAM caching and immune to POSIX semaphore leaks
         return DataLoader(
             dataset, 
             batch_size=self.batch_size, 
             shuffle=True, 
-            num_workers=self.num_workers, 
-            pin_memory=True,
-            persistent_workers=(self.num_workers > 0)
+            num_workers=0, 
+            pin_memory=True
         )
 
     def get_task_val_dataloader(self, task_id: int) -> DataLoader:
         class_list = self.task_generator.get_task(task_id + 1).class_names
         dataset = TinyImageNetTaskDataset(self.data_dir, class_list, split='val', transform=self.eval_transform)
-        # num_workers=0 for validation avoids multiprocessing IPC semaphore leaks in Python 3.14
         return DataLoader(
             dataset, 
             batch_size=self.batch_size, 
