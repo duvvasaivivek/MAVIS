@@ -50,14 +50,17 @@ class AugmentationConfig:
 @dataclass
 class TrainingConfig:
     """Training hyperparameters."""
-    batch_size: int = 512
+    batch_size: int = 128
     epochs_per_task: int = 100
     learning_rate: float = 0.008
+    lr_backbone_factor: float = 0.1  # Backbone LR damping factor for tasks t >= 1
+    label_smoothing: float = 0.05
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
     # Continual Learning loss weights (Lever 4 & Cross-Task Repulsion)
     distill_lambda: float = 4.0
+    spatial_distill_lambda: float = 2.0
     proto_lambda: float = 1.0
     repel_lambda: float = 2.0
     # Progressive training stages

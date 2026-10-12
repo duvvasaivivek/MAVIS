@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def compute_fisher(model, dataloader, device, num_samples=1000):
+def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, classes_per_task=20):
     """
     Estimate the diagonal Fisher Information Matrix.
 
@@ -26,6 +26,8 @@ def compute_fisher(model, dataloader, device, num_samples=1000):
         dataloader: training data for the task just completed
         device: 'cuda' or 'cpu'
         num_samples: max samples to use for estimation
+        task_id: index of the task just completed
+        classes_per_task: number of classes per task (for absolute indexing)
 
     Returns:
         Dictionary mapping parameter name -> Fisher diagonal tensor
@@ -35,11 +37,14 @@ def compute_fisher(model, dataloader, device, num_samples=1000):
 
     samples_seen = 0
     batches_seen = 0
+    start_cls = task_id * classes_per_task
+
     for inputs, targets in dataloader:
         if samples_seen >= num_samples:
             break
 
         inputs, targets = inputs.to(device), targets.to(device)
+        targets = targets + start_cls  # Offset to absolute class indices
         batch_size = inputs.size(0)
 
         model.zero_grad()
@@ -57,7 +62,7 @@ def compute_fisher(model, dataloader, device, num_samples=1000):
 
     # Average over batches
     for n in fisher:
-        fisher[n] /= batches_seen
+        fisher[n] /= max(1, batches_seen)
 
     model.train()
     return fisher
@@ -92,12 +97,12 @@ class OnlineEWC:
         self.saved_params = None
         self.task_count = 0
 
-    def update(self, model, dataloader, device, num_samples=1000):
+    def update(self, model, dataloader, device, num_samples=1000, task_id=0, classes_per_task=20):
         """
         Call this AFTER training on a task completes.
         Updates the running Fisher and saves current params.
         """
-        new_fisher = compute_fisher(model, dataloader, device, num_samples)
+        new_fisher = compute_fisher(model, dataloader, device, num_samples, task_id=task_id, classes_per_task=classes_per_task)
 
         if self.running_fisher is None:
             # First task: just store directly

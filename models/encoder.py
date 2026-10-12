@@ -65,8 +65,7 @@ class CNNEncoder(nn.Module):
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(1024 * BasicBlock.expansion, feature_dim),
-            nn.LayerNorm(feature_dim),
-            nn.ReLU(inplace=True)
+            nn.LayerNorm(feature_dim)
         )
 
     def _make_layer(self, block, planes, num_blocks, stride, dropout_rate):
@@ -77,14 +76,16 @@ class CNNEncoder(nn.Module):
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_spatial: bool = False):
         x = self.relu(self.gn1(self.conv1(x)))
         
         x = self.layer1(x)
         x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        f3 = self.layer3(x)
+        f4 = self.layer4(f3)
         
-        x = self.avgpool(x)
-        x = self.fc(x)
-        return x
+        pooled = self.avgpool(f4)
+        out = self.fc(pooled)
+        if return_spatial:
+            return out, [f3, f4]
+        return out

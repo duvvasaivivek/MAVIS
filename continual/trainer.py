@@ -124,7 +124,10 @@ class ContinualTrainer:
         # After training this task, update Online EWC state
         if self.ewc_lambda > 0:
             print(f"  [EWC] Updating Online Fisher Information ({self.fisher_samples} samples)...")
-            self.ewc_module.update(self.model, train_loader, self.device, self.fisher_samples)
+            self.ewc_module.update(
+                self.model, train_loader, self.device, self.fisher_samples,
+                task_id=task_id, classes_per_task=self.task_gen.classes_per_task
+            )
             print(f"  [EWC] Updated Fisher + params for Task {task_id + 1}")
 
     def evaluate_all_tasks(self, current_task_id: int):

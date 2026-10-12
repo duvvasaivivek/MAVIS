@@ -71,7 +71,7 @@ class MAVIS(nn.Module):
         # 5. Classifier (balanced CosineLinear head)
         self.classifier = IncrementalClassifier(feature_dim=feature_dim, total_classes=total_classes)
 
-    def forward(self, x, task_id=None, return_features=False):
+    def forward(self, x, task_id=None, return_features=False, return_spatials=False):
         """
         Args:
             x: input images [B, 3, 64, 64]
@@ -81,13 +81,18 @@ class MAVIS(nn.Module):
                 - During EVALUATION: pass None.
                   Memory retrieval uses all locked memories.
             return_features: bool, whether to return encoder and fused features
+            return_spatials: bool, whether to return intermediate convolutional feature maps
 
         Returns:
             logits: [B, 200]
-            (optional) current_features, fused_features
+            (optional) current_features, fused_features, spatials
         """
         # 1. Extract current features
-        current_features = self.encoder(x)
+        if return_spatials:
+            current_features, spatials = self.encoder(x, return_spatial=True)
+        else:
+            current_features = self.encoder(x)
+            spatials = None
 
         # 2. Retrieve past/active features from memory
         if task_id is not None:
@@ -100,13 +105,17 @@ class MAVIS(nn.Module):
         retrieved_features = self.attention(current_features, memories)
 
         # 3. Gated Fusion
+        # Clamped gate (0.15 .. 0.85) guarantees retrieved memory is never silenced
         concat = torch.cat([current_features, retrieved_features], dim=1)  # [B, 2*D]
-        gate = self.fusion_gate(concat)  # [B, D], values in (0, 1)
+        raw_gate = self.fusion_gate(concat)  # [B, D], values in (0, 1)
+        gate = 0.15 + 0.70 * raw_gate
         fused_features = gate * current_features + (1.0 - gate) * retrieved_features
 
         # 4. Classify from fused features
         logits = self.classifier(fused_features)
 
+        if return_spatials:
+            return logits, current_features, fused_features, spatials
         if return_features:
             return logits, current_features, fused_features
         return logits

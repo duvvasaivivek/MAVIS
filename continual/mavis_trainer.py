@@ -19,7 +19,8 @@ class MAVISTrainer:
     representation-preserving feature distillation, and Memory Attention retrieval.
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None, distill_lambda: float = 4.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0):
+                 checkpoint_dir, device=None, distill_lambda: float = 4.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0,
+                 lr_backbone_factor: float = 0.1, spatial_distill_lambda: float = 2.0, label_smoothing: float = 0.05):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -29,15 +30,17 @@ class MAVISTrainer:
         self.loader = loader
         self.task_gen = task_gen
         self.learning_rate = learning_rate
+        self.lr_backbone_factor = lr_backbone_factor
         self.epochs_per_task = epochs_per_task
         self.checkpoint_dir = checkpoint_dir
         self.distill_lambda = distill_lambda
+        self.spatial_distill_lambda = spatial_distill_lambda
         self.proto_lambda = proto_lambda
         self.repel_lambda = repel_lambda
         self.old_encoder = None
         self.base_encoder = None  # Task 1 base coordinate anchor (E_0)
 
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         self.accuracy_matrix = []       # Primary Continual Learning matrix (NCM)
         self.accuracy_matrix_ncm = []   # NCM Memory Matrix
         self.accuracy_matrix_head = []  # Aligned Linear Head Matrix
@@ -49,11 +52,22 @@ class MAVISTrainer:
         print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} (MAVIS) ---", flush=True)
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
-        # AdamW optimizer and OneCycleLR scheduler
-        optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
+        # Differential Learning Rates:
+        # Task 1: Learn entire network from scratch at full learning_rate (high plasticity)
+        # Tasks 2+: Damp backbone LR by lr_backbone_factor (stability), while head/attention have full plasticity
+        if task_id == 0:
+            optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
+        else:
+            optimizer = optim.AdamW([
+                {'params': self.model.encoder.parameters(), 'lr': self.learning_rate * self.lr_backbone_factor},
+                {'params': self.model.attention.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.fusion_gate.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.classifier.parameters(), 'lr': self.learning_rate}
+            ], weight_decay=1e-2)
+
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer, 
-            max_lr=self.learning_rate, 
+            max_lr=[p['lr'] for p in optimizer.param_groups], 
             steps_per_epoch=len(train_loader), 
             epochs=self.epochs_per_task
         )
@@ -80,9 +94,9 @@ class MAVISTrainer:
                     targets = targets + start_cls
                     local_targets = targets - start_cls
 
-                    # Pass task_id so model retrieves past memories + current running prototypes
-                    logits, current_features, fused_features = self.model(
-                        inputs, task_id=task_id, return_features=True
+                    # Pass task_id so model retrieves past memories + current running prototypes, and get spatial features
+                    logits, current_features, fused_features, spatials = self.model(
+                        inputs, task_id=task_id, return_spatials=True
                     )
                     
                     # Update online running prototypes for active task (no grad)
@@ -97,7 +111,7 @@ class MAVISTrainer:
                     # Multi-Anchor Distillation: Anchors to BOTH Task 1 Base E_0 AND Step E_{t-1}
                     if self.old_encoder is not None:
                         with torch.no_grad():
-                            old_features = self.old_encoder(inputs)
+                            old_features, old_spatials = self.old_encoder(inputs, return_spatial=True)
                         loss_step = (1.0 - F.cosine_similarity(current_features, old_features, dim=-1)).mean()
 
                         if self.base_encoder is not None:
@@ -107,34 +121,51 @@ class MAVISTrainer:
                             loss_distill = 0.5 * loss_step + 0.5 * loss_base
                         else:
                             loss_distill = loss_step
+
+                        # Spatial channel pooling distillation (PODNet-style):
+                        loss_spatial = 0.0
+                        for s_curr, s_old in zip(spatials, old_spatials):
+                            pool_curr = F.normalize(s_curr.mean(dim=[2, 3]), p=2, dim=-1)
+                            pool_old = F.normalize(s_old.mean(dim=[2, 3]), p=2, dim=-1)
+                            loss_spatial = loss_spatial + (1.0 - (pool_curr * pool_old).sum(dim=-1)).mean()
+                        loss_spatial = loss_spatial / max(1, len(spatials))
                     else:
                         loss_distill = torch.tensor(0.0, device=self.device)
+                        loss_spatial = torch.tensor(0.0, device=self.device)
 
-                    # Prototype Alignment Loss (Clusters current features around class prototypes)
+                    # Contrastive Prototype Alignment Loss (InfoNCE on active task prototypes)
+                    # Pulls features toward true prototype, actively repelling from other active prototypes
                     curr_protos = self.model.memory_bank.get_current_task_prototypes()
-                    target_protos = curr_protos[local_targets]
-                    valid_proto_mask = self.model.memory_bank.running_counts[local_targets] > 0
-                    if valid_proto_mask.any():
-                        norm_f = F.normalize(current_features[valid_proto_mask], p=2, dim=-1)
-                        norm_p = target_protos[valid_proto_mask].detach()
-                        loss_proto = (1.0 - (norm_f * norm_p).sum(dim=-1)).mean()
+                    valid_proto_count = (self.model.memory_bank.running_counts > 0).sum()
+                    if valid_proto_count >= 2:
+                        norm_f = F.normalize(current_features, p=2, dim=-1)
+                        norm_p = F.normalize(curr_protos, p=2, dim=-1).detach()
+                        proto_logits = torch.matmul(norm_f, norm_p.t()) / 0.10
+                        loss_proto = F.cross_entropy(proto_logits, local_targets)
                     else:
                         loss_proto = torch.tensor(0.0, device=self.device)
 
-                    # Historical Memory Contrastive Repulsion (Pushes new features away from past prototypes)
+                    # Historical Memory Contrastive Repulsion + Attention Consistency
                     past_protos = self.model.memory_bank.get_past_memories(task_id)
-                    if past_protos is not None:
+                    if past_protos is not None and past_protos.size(0) > 0:
                         norm_curr = F.normalize(current_features, p=2, dim=-1)
                         norm_past = F.normalize(past_protos, p=2, dim=-1).detach()
                         sim_to_past = torch.matmul(norm_curr, norm_past.t())
                         loss_repel = F.relu(sim_to_past - 0.20).pow(2).mean()
+
+                        # Attention Self-Reconstruction Loss (Attention fidelity on past memories)
+                        recon_out = self.model.attention(norm_past, past_protos)
+                        loss_recon = F.mse_loss(recon_out, norm_past)
                     else:
                         loss_repel = torch.tensor(0.0, device=self.device)
+                        loss_recon = torch.tensor(0.0, device=self.device)
 
                     loss = (loss_ce 
                             + self.distill_lambda * loss_distill 
+                            + self.spatial_distill_lambda * loss_spatial
                             + self.proto_lambda * loss_proto 
-                            + self.repel_lambda * loss_repel)
+                            + self.repel_lambda * loss_repel
+                            + 1.0 * loss_recon)
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
