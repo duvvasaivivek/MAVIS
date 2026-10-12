@@ -52,24 +52,10 @@ class IncrementalClassifier(nn.Module):
     @torch.no_grad()
     def align_weights(self, num_old_classes: int, num_new_classes: int, prototypes: torch.Tensor = None):
         """
-        Weight Aligning (WA - CVPR 2020 & Cosine Recency Calibration):
-        Calibrates the effective logits of newly trained classes with historical classes,
-        removing classifier recency bias so old tasks don't get drowned out.
+        Measure 1: Equalize classifier head temperature scales.
+        Ensures all seen classes operate on an identical logit scale (1.0),
+        eliminating cross-task softmax temperature suppression.
         """
-        if num_old_classes <= 0 or num_new_classes <= 0:
-            return
-        
-        old_w = self.fc.weight[:num_old_classes]
-        new_w = self.fc.weight[num_old_classes:num_old_classes + num_new_classes]
-
-        # 1. Classical WA norm ratio (Zhao et al., CVPR 2020)
-        old_norm = torch.norm(old_w, p=2, dim=1).mean()
-        new_norm = torch.norm(new_w, p=2, dim=1).mean()
-        raw_ratio = (old_norm / new_norm).item() if new_norm > 0 else 0.55
-
-        # 2. In CosineLinear, parameter norms are initialized identically, but recency bias
-        # occurs because the optimizer spent 100 epochs aligning the newest classes to ~0.90+
-        # while older classes align to ~0.45-0.55. We unconditionally calibrate gamma to [0.45, 0.60].
-        gamma = max(0.45, min(0.60, float(raw_ratio)))
-        self.fc.task_scale[num_old_classes:num_old_classes + num_new_classes] = gamma
-        print(f"  [WeightAlign] Set gamma={gamma:.4f} for classes [{num_old_classes}..{num_old_classes + num_new_classes - 1}]", flush=True)
+        total_seen = num_old_classes + num_new_classes
+        self.fc.task_scale[:total_seen] = 1.0
+        print(f"  [Measure 1: WeightAlign] Equalized temperature scale to 1.0 across all {total_seen} seen classes.", flush=True)

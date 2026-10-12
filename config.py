@@ -63,6 +63,7 @@ class TrainingConfig:
     spatial_distill_lambda: float = 2.0
     proto_lambda: float = 1.0
     repel_lambda: float = 2.0
+    proto_replay_lambda: float = 1.0  # Measure 2: Prototype Feature Replay on Classifier Head
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2

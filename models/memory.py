@@ -145,6 +145,36 @@ class MemoryBank(nn.Module):
         indices = torch.tensor(valid_indices, device=self.memory.device)
         return self.memory[indices].reshape(-1, self.feature_dim)
 
+    def get_past_prototypes_and_labels(self, current_task_id: int):
+        """
+        Returns all stored prototypes and their ground-truth class labels
+        for tasks 0..current_task_id-1 (Measure 2: Prototype Feature Replay).
+        Returns (prototypes [N_proto, D], labels [N_proto]).
+        """
+        if current_task_id <= 0:
+            return None, None
+
+        valid_indices = []
+        for t in range(current_task_id):
+            if self.is_populated[t]:
+                valid_indices.append(t)
+
+        if len(valid_indices) == 0:
+            return None, None
+
+        indices = torch.tensor(valid_indices, device=self.memory.device)
+        selected_mem = self.memory[indices]  # [len(valid_indices), classes_per_task, K, D]
+        num_past_classes = len(valid_indices) * self.classes_per_task
+        protos = selected_mem.reshape(num_past_classes * self.prototypes_per_class, self.feature_dim)
+
+        task_labels = []
+        for t in valid_indices:
+            t_labels = torch.arange(t * self.classes_per_task, (t + 1) * self.classes_per_task, device=self.memory.device).repeat_interleave(self.prototypes_per_class)
+            task_labels.append(t_labels)
+        labels = torch.cat(task_labels, dim=0)
+
+        return protos, labels
+
     def get_training_memories(self, current_task_id: int):
         """
         Returns all memories available during training:

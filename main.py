@@ -244,7 +244,8 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         proto_lambda=getattr(config.training, "proto_lambda", 1.0),
         repel_lambda=getattr(config.training, "repel_lambda", 2.0),
         lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.1),
-        label_smoothing=getattr(config.training, "label_smoothing", 0.05)
+        label_smoothing=getattr(config.training, "label_smoothing", 0.05),
+        proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0)
     )
 
     # Auto-resume from latest completed task if checkpoint exists
@@ -282,6 +283,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     if os.path.exists(metrics_ckpt):
                         with open(metrics_ckpt, "r") as f:
                             trainer.accuracy_matrix = json.load(f)
+                    metrics_hier_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_hier.json")
+                    if os.path.exists(metrics_hier_ckpt):
+                        with open(metrics_hier_ckpt, "r") as f:
+                            trainer.accuracy_matrix_hier = json.load(f)
                     metrics_ncm_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_ncm.json")
                     if os.path.exists(metrics_ncm_ckpt):
                         with open(metrics_ncm_ckpt, "r") as f:
@@ -315,6 +320,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                         trainer.old_encoder = None
                         trainer.base_encoder = None
                         trainer.accuracy_matrix = []
+                        trainer.accuracy_matrix_hier = []
                         trainer.accuracy_matrix_ncm = []
                         trainer.accuracy_matrix_head = []
                         trainer.accuracy_matrix_ens = []
@@ -334,17 +340,22 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     for task_id in range(start_task, config.dataset.num_tasks):
         trainer.train_task(task_id)
         trainer.evaluate_all_tasks(task_id)
-        forgetting = trainer.compute_forgetting()
-        print(f"  -> Average Forgetting so far (NCM): {forgetting:.4f}", flush=True)
+        forgetting_hier = trainer.compute_forgetting(trainer.accuracy_matrix_hier)
+        forgetting_ens = trainer.compute_forgetting(trainer.accuracy_matrix_ens)
+        forgetting_ncm = trainer.compute_forgetting(trainer.accuracy_matrix_ncm)
+        forgetting_head = trainer.compute_forgetting(trainer.accuracy_matrix_head)
+        print(f"  -> Average Forgetting so far | Hierarchical: {forgetting_hier:.4f} | Ensemble: {forgetting_ens:.4f} | NCM: {forgetting_ncm:.4f} | Head: {forgetting_head:.4f}", flush=True)
 
     final_res = {
         "final_accuracy_matrix": trainer.accuracy_matrix,
+        "final_accuracy_matrix_hier": trainer.accuracy_matrix_hier,
+        "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
         "final_accuracy_matrix_ncm": trainer.accuracy_matrix_ncm,
         "final_accuracy_matrix_head": trainer.accuracy_matrix_head,
-        "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
+        "final_forgetting_hier": trainer.compute_forgetting(trainer.accuracy_matrix_hier),
+        "final_forgetting_ens": trainer.compute_forgetting(trainer.accuracy_matrix_ens),
         "final_forgetting_ncm": trainer.compute_forgetting(trainer.accuracy_matrix_ncm),
-        "final_forgetting_head": trainer.compute_forgetting(trainer.accuracy_matrix_head),
-        "final_forgetting_ens": trainer.compute_forgetting(trainer.accuracy_matrix_ens)
+        "final_forgetting_head": trainer.compute_forgetting(trainer.accuracy_matrix_head)
     }
     res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)

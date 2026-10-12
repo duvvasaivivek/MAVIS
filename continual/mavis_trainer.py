@@ -20,7 +20,8 @@ class MAVISTrainer:
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
                  checkpoint_dir, device=None, distill_lambda: float = 4.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0,
-                 lr_backbone_factor: float = 0.1, spatial_distill_lambda: float = 2.0, label_smoothing: float = 0.05):
+                 lr_backbone_factor: float = 0.1, spatial_distill_lambda: float = 2.0, label_smoothing: float = 0.05,
+                 proto_replay_lambda: float = 1.0):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -37,14 +38,16 @@ class MAVISTrainer:
         self.spatial_distill_lambda = spatial_distill_lambda
         self.proto_lambda = proto_lambda
         self.repel_lambda = repel_lambda
+        self.proto_replay_lambda = proto_replay_lambda
         self.old_encoder = None
         self.base_encoder = None  # Task 1 base coordinate anchor (E_0)
 
         self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-        self.accuracy_matrix = []       # Primary Continual Learning matrix (NCM)
+        self.accuracy_matrix = []       # Primary Continual Learning matrix (Hierarchical)
+        self.accuracy_matrix_hier = []  # Measure 3: Hierarchical Memory-Routed Matrix
+        self.accuracy_matrix_ens = []   # Fused Ensemble Matrix
         self.accuracy_matrix_ncm = []   # NCM Memory Matrix
         self.accuracy_matrix_head = []  # Aligned Linear Head Matrix
-        self.accuracy_matrix_ens = []   # Fused Ensemble Matrix
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -160,12 +163,35 @@ class MAVISTrainer:
                         loss_repel = torch.tensor(0.0, device=self.device)
                         loss_recon = torch.tensor(0.0, device=self.device)
 
+                    # Measure 2: Prototype Feature Replay on Classifier Head
+                    past_protos_replay, past_labels_replay = self.model.memory_bank.get_past_prototypes_and_labels(task_id)
+                    if past_protos_replay is not None and past_protos_replay.size(0) > 0:
+                        curr_protos = self.model.memory_bank.get_current_task_prototypes()
+                        valid_curr = (self.model.memory_bank.running_counts > 0)
+                        if valid_curr.any():
+                            curr_labels = torch.arange(start_cls, end_cls, device=self.device)[valid_curr]
+                            curr_selected = curr_protos[valid_curr]
+                            all_replay_protos = torch.cat([past_protos_replay, curr_selected], dim=0)
+                            all_replay_labels = torch.cat([past_labels_replay, curr_labels], dim=0)
+                        else:
+                            all_replay_protos = past_protos_replay
+                            all_replay_labels = past_labels_replay
+
+                        # Feature jitter to simulate continuous exemplar distribution around prototypes
+                        proto_noise = 0.02 * torch.randn_like(all_replay_protos)
+                        replay_inputs = F.normalize(all_replay_protos + proto_noise, p=2, dim=-1)
+                        replay_logits = self.model.classifier(replay_inputs)
+                        loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
+                    else:
+                        loss_proto_replay = torch.tensor(0.0, device=self.device)
+
                     loss = (loss_ce 
                             + self.distill_lambda * loss_distill 
                             + self.spatial_distill_lambda * loss_spatial
                             + self.proto_lambda * loss_proto 
                             + self.repel_lambda * loss_repel
-                            + 1.0 * loss_recon)
+                            + 1.0 * loss_recon
+                            + self.proto_replay_lambda * loss_proto_replay)
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -173,8 +199,8 @@ class MAVISTrainer:
                 scheduler.step()
 
                 total_loss += loss.item() * inputs.size(0)
-                # Accuracy calculation based on unmasked logits
-                _, predicted = logits.max(1)
+                # Accuracy calculation based on all seen logits
+                _, predicted = logits[:, :end_cls].max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
@@ -217,7 +243,13 @@ class MAVISTrainer:
         task_head_accuracies = []
         task_ncm_accuracies = []
         task_ens_accuracies = []
+        task_hier_accuracies = []
+        task_routing_accuracies = []
         print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...", flush=True)
+
+        seen_classes = (current_task_id + 1) * self.model.memory_bank.classes_per_task
+        classes_per_task = self.model.memory_bank.classes_per_task
+        num_tasks_seen = current_task_id + 1
 
         with torch.no_grad():
             for t in range(current_task_id + 1):
@@ -225,12 +257,14 @@ class MAVISTrainer:
                 correct_head = 0
                 correct_ncm = 0
                 correct_ens = 0
+                correct_hier = 0
+                correct_task_routing = 0
                 total = 0
 
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
                     # Offset targets to absolute class indices
-                    start_cls = t * self.model.memory_bank.classes_per_task
+                    start_cls = t * classes_per_task
                     targets = targets + start_cls
                     
                     with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
@@ -239,12 +273,12 @@ class MAVISTrainer:
                             inputs, return_features=True
                         )
                         
-                    # 1. Aligned Classifier Head Prediction
-                    _, pred_head = logits.max(1)
+                    # 1. Aligned Classifier Head Prediction (Flat across seen classes)
+                    _, pred_head = logits[:, :seen_classes].max(1)
                     total += targets.size(0)
                     correct_head += pred_head.eq(targets).sum().item()
 
-                    # 2. Multi-Prototype Nearest Class Mean (NCM) Prediction in prototype space
+                    # 2. Multi-Prototype Nearest Class Mean (NCM) Prediction in prototype space (Flat)
                     ncm_scores = self.model.memory_bank.compute_ncm_scores(
                         current_features, up_to_task_id=current_task_id
                     )
@@ -252,47 +286,79 @@ class MAVISTrainer:
                         _, pred_ncm = ncm_scores.max(1)
                         correct_ncm += pred_ncm.eq(targets).sum().item()
 
-                        # 3. Ensemble Prediction (Head Logits + Scaled NCM Cosine Scores)
-                        seen_classes = (current_task_id + 1) * self.model.memory_bank.classes_per_task
+                        # 3. Ensemble Prediction (Flat: Head Logits + Scaled NCM Cosine Scores)
                         ens_scores = logits[:, :seen_classes] + self.model.classifier.fc.scale * ncm_scores
                         _, pred_ens = ens_scores.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
+
+                        # 4. Measure 3: Hierarchical Memory-Routed Evaluation
+                        # Stage 1: Route query to predicted task using maximum prototype affinity in Memory Bank
+                        task_affinities = []
+                        for k in range(num_tasks_seen):
+                            k_start = k * classes_per_task
+                            k_end = k_start + classes_per_task
+                            task_affinities.append(ncm_scores[:, k_start:k_end].max(dim=1)[0])
+                        task_affinities = torch.stack(task_affinities, dim=1)  # [B, num_tasks_seen]
+                        pred_task = task_affinities.argmax(dim=1)  # [B]
+                        true_task = targets // classes_per_task
+                        correct_task_routing += pred_task.eq(true_task).sum().item()
+
+                        # Stage 2: Within the routed task, pick the best class using intra-task ensemble
+                        pred_hier = torch.zeros_like(targets)
+                        for k in range(num_tasks_seen):
+                            mask = (pred_task == k)
+                            if mask.any():
+                                k_start = k * classes_per_task
+                                k_end = k_start + classes_per_task
+                                intra_best = ens_scores[mask, k_start:k_end].argmax(dim=1)
+                                pred_hier[mask] = k_start + intra_best
+                        correct_hier += pred_hier.eq(targets).sum().item()
                     else:
                         correct_ncm += correct_head
                         correct_ens += correct_head
+                        correct_hier += correct_head
+                        correct_task_routing += targets.size(0)
 
                 head_acc = correct_head / total if total > 0 else 0.0
                 ncm_acc = correct_ncm / total if total > 0 else 0.0
                 ens_acc = correct_ens / total if total > 0 else 0.0
+                hier_acc = correct_hier / total if total > 0 else 0.0
+                routing_acc = correct_task_routing / total if total > 0 else 0.0
 
                 task_head_accuracies.append(head_acc)
                 task_ncm_accuracies.append(ncm_acc)
                 task_ens_accuracies.append(ens_acc)
+                task_hier_accuracies.append(hier_acc)
+                task_routing_accuracies.append(routing_acc)
 
-                print(f"  -> Task {t+1} NCM: {ncm_acc:.4f} (Memory) | Ensemble: {ens_acc:.4f} | Head: {head_acc:.4f}", flush=True)
+                print(f"  -> Task {t+1} Hierarchical: {hier_acc:.4f} | Ensemble: {ens_acc:.4f} | NCM: {ncm_acc:.4f} | Head: {head_acc:.4f} (Task ID Acc: {routing_acc:.4f})", flush=True)
 
-        # Store primary matrix as NCM (the robust continual memory representation)
-        self.accuracy_matrix.append(task_ncm_accuracies)
+        # Store primary matrix as Hierarchical (Measure 3)
+        self.accuracy_matrix.append(task_hier_accuracies)
+        self.accuracy_matrix_hier.append(task_hier_accuracies)
+        self.accuracy_matrix_ens.append(task_ens_accuracies)
         self.accuracy_matrix_ncm.append(task_ncm_accuracies)
         self.accuracy_matrix_head.append(task_head_accuracies)
-        self.accuracy_matrix_ens.append(task_ens_accuracies)
 
         # Save checkpoint (model weights + accuracy history)
         ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_task_{current_task_id+1}.pth")
         torch.save(self.model.state_dict(), ckpt_path)
         metrics_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix.json")
+        metrics_hier_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_hier.json")
+        metrics_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ens.json")
         metrics_ncm_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ncm.json")
         metrics_head_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_head.json")
-        metrics_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ens.json")
         import json
         with open(metrics_ckpt, "w") as f:
             json.dump(self.accuracy_matrix, f, indent=2)
+        with open(metrics_hier_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix_hier, f, indent=2)
+        with open(metrics_ens_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix_ens, f, indent=2)
         with open(metrics_ncm_ckpt, "w") as f:
             json.dump(self.accuracy_matrix_ncm, f, indent=2)
         with open(metrics_head_ckpt, "w") as f:
             json.dump(self.accuracy_matrix_head, f, indent=2)
-        with open(metrics_ens_ckpt, "w") as f:
-            json.dump(self.accuracy_matrix_ens, f, indent=2)
 
     def compute_forgetting(self, matrix=None):
         """Compute average forgetting across all completed tasks."""
