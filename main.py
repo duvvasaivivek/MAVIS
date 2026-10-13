@@ -374,6 +374,7 @@ def main():
         help="Command to run",
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epochs per task (e.g. 30)")
     parser.add_argument("--fresh", action="store_true", help="Start training fresh from Task 1 even if checkpoints exist")
     args = parser.parse_args()
 
@@ -382,6 +383,10 @@ def main():
         config = MAVISConfig.load(args.config)
     else:
         config = get_default_config()
+
+    if args.epochs is not None:
+        config.training.epochs_per_task = args.epochs
+        print(f"[Config] Command-line override: epochs_per_task = {args.epochs}")
 
     # Route command
     if args.command == "config":
