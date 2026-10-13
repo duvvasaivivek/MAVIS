@@ -18,7 +18,7 @@ class CosineLinear(nn.Module):
     Normalizes both weights and features to unit sphere:
         logits = scale * (x / ||x||) @ (w / ||w||)^T * task_scale
     """
-    def __init__(self, in_features: int, out_features: int, scale: float = 16.0):
+    def __init__(self, in_features: int, out_features: int, scale: float = 24.0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -40,7 +40,7 @@ class IncrementalClassifier(nn.Module):
     A balanced classification head mapping feature vectors to class logits
     using CosineLinear with Weight Aligning (WA).
     """
-    def __init__(self, feature_dim: int, total_classes: int = 200, scale: float = 16.0):
+    def __init__(self, feature_dim: int, total_classes: int = 200, scale: float = 24.0):
         super().__init__()
         self.feature_dim = feature_dim
         self.total_classes = total_classes

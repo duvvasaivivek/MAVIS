@@ -241,10 +241,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         device=device,
         distill_lambda=getattr(config.training, "distill_lambda", 2.0),
         spatial_distill_lambda=getattr(config.training, "spatial_distill_lambda", 1.0),
-        proto_lambda=getattr(config.training, "proto_lambda", 1.0),
+        proto_lambda=getattr(config.training, "proto_lambda", 0.5),
         repel_lambda=getattr(config.training, "repel_lambda", 2.0),
-        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.25),
-        label_smoothing=getattr(config.training, "label_smoothing", 0.05),
+        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.35),
+        label_smoothing=getattr(config.training, "label_smoothing", 0.02),
         proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0)
     )
 

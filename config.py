@@ -53,15 +53,15 @@ class TrainingConfig:
     batch_size: int = 128
     epochs_per_task: int = 50  # 50-epoch optimal schedule: drives intra-task training accuracy to >0.90+ while preserving memory stability
     learning_rate: float = 0.008
-    lr_backbone_factor: float = 0.25  # Plasticity Rebalance: 0.25x backbone LR for tasks t >= 1 (was 0.10)
-    label_smoothing: float = 0.05
+    lr_backbone_factor: float = 0.35  # Plasticity Rebalance: 0.35x backbone LR for tasks t >= 1 (was 0.25)
+    label_smoothing: float = 0.02      # Lower loss floor to enable sharp convergence (>0.90+ train acc)
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
     # Continual Learning loss weights (Plasticity Rebalance: moderated distillation)
-    distill_lambda: float = 2.0         # Feature Distillation to E_0 and E_{t-1} (was 4.0)
-    spatial_distill_lambda: float = 1.0 # Multi-Axis PODNet spatial distillation (was 2.0)
-    proto_lambda: float = 1.0
+    distill_lambda: float = 2.0         # Feature Distillation to E_0 and E_{t-1}
+    spatial_distill_lambda: float = 1.0 # Multi-Axis PODNet spatial distillation
+    proto_lambda: float = 0.5           # Relaxed centroid alignment (was 1.0) to preserve sample variance
     repel_lambda: float = 2.0
     proto_replay_lambda: float = 1.0    # Gaussian Covariance Prototype Replay
     # Progressive training stages

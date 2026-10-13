@@ -19,8 +19,8 @@ class MAVISTrainer:
     representation-preserving feature distillation, and Memory Attention retrieval.
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None, distill_lambda: float = 2.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0,
-                 lr_backbone_factor: float = 0.25, spatial_distill_lambda: float = 1.0, label_smoothing: float = 0.05,
+                 checkpoint_dir, device=None, distill_lambda: float = 2.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
+                 lr_backbone_factor: float = 0.35, spatial_distill_lambda: float = 1.0, label_smoothing: float = 0.02,
                  proto_replay_lambda: float = 1.0):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -157,7 +157,7 @@ class MAVISTrainer:
                     if valid_proto_count >= 2:
                         norm_f = F.normalize(current_features, p=2, dim=-1)
                         norm_p = F.normalize(curr_protos, p=2, dim=-1).detach()
-                        proto_logits = torch.matmul(norm_f, norm_p.t()) / 0.10
+                        proto_logits = torch.matmul(norm_f, norm_p.t()) / 0.20
                         loss_proto = F.cross_entropy(proto_logits, local_targets)
                     else:
                         loss_proto = torch.tensor(0.0, device=self.device)

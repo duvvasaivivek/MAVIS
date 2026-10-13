@@ -106,10 +106,10 @@ class MAVIS(nn.Module):
         retrieved_features = self.attention(current_features, memories)
 
         # 3. Gated Fusion
-        # Clamped gate (0.15 .. 0.85) guarantees retrieved memory is never silenced
+        # Clamped gate (0.05 .. 0.95) allows high fidelity feature routing while preserving memory retrieval
         concat = torch.cat([current_features, retrieved_features], dim=1)  # [B, 2*D]
         raw_gate = self.fusion_gate(concat)  # [B, D], values in (0, 1)
-        gate = 0.15 + 0.70 * raw_gate
+        gate = 0.05 + 0.90 * raw_gate
         fused_features = gate * current_features + (1.0 - gate) * retrieved_features
 
         # 4. Classify from fused features
