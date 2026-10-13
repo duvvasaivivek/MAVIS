@@ -95,4 +95,18 @@ This document serves as a living record of architectural decisions, implementati
 3. **Calibrated Cosine Weight Aligning:** Calibrates $\gamma$ for CosineLinear based on the effective logit ratio between historical and freshly-trained classes ($\gamma \in [0.50, 0.65]$).
 4. **Canonical NCM & Fused Ensemble Evaluation:** Evaluates Multi-Prototype NCM directly in prototype space and computes an ensemble score ($\text{Logits} + \text{Scale} \cdot \mathbf{S}_{NCM}$), tracking and reporting Head, NCM, and Ensemble metrics across all tasks.
 
+---
 
+## Phase 4 Benchmark Validation & 50-Epoch Schedule Optimization
+**Date:** October 2026
+**Job 61 Results (30 Epochs, K=5 Prototypes, Gaussian Replay, Temperature Attention, Bayesian Routing):**
+- **Mean Ensemble Accuracy:** Rose to **24.55%** (vs 22.05% in Job 59).
+- **Mean Linear Head Accuracy:** Rose to **22.73%** (vs 18.35% in Job 59).
+- **Linear Head Catastrophic Forgetting:** Dropped to **24.24%** (vs 31.42% in Job 59, 58.6% in Baseline).
+- **Task 1 Long-term Retention:** Reached **53.80%** (vs 46.40% in Job 59).
+- **Task ID Bayesian Routing Accuracy:** 74%–76% across tasks.
+
+**50-Epoch Convergence & Progressive Distillation Ramp Implementation:**
+1. **50-Epoch Optimal Schedule:** Scaled default `epochs_per_task` to 50 in `config.py` (~3 hours total execution on RTX 6000 Ada).
+2. **Progressive Distillation Annealing:** Added warmup ramp `distill_scale = min(1.0, 0.2 + 0.8 * (epoch / 8.0))` for incremental tasks ($t \ge 1$), unlocking early plasticity for fast feature acquisition before locking down historical geometry.
+3. **Refined OneCycleLR Schedule:** Configured `pct_start=0.15`, `div_factor=10.0`, `final_div_factor=100.0` to provide 42+ epochs of cosine learning rate descent, driving training accuracy to $>0.90+$ across all tasks.

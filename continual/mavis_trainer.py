@@ -72,7 +72,11 @@ class MAVISTrainer:
             optimizer, 
             max_lr=[p['lr'] for p in optimizer.param_groups], 
             steps_per_epoch=len(train_loader), 
-            epochs=self.epochs_per_task
+            epochs=self.epochs_per_task,
+            pct_start=0.15,
+            anneal_strategy='cos',
+            div_factor=10.0,
+            final_div_factor=100.0
         )
         scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
 
@@ -84,6 +88,12 @@ class MAVISTrainer:
             total = 0
 
             start_time = time.time()
+
+            # Progressive Distillation Annealing (Warmup):
+            # In incremental tasks (task_id > 0), allow high plasticity during early epochs (0-7)
+            # so the backbone rapidly captures new class representations without fighting rigid distillation.
+            # Ramps from 0.2 -> 1.0 linearly across the first 8 epochs.
+            distill_scale = min(1.0, 0.2 + 0.8 * (epoch / 8.0)) if task_id > 0 else 0.0
 
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
@@ -193,8 +203,8 @@ class MAVISTrainer:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
 
                     loss = (loss_ce 
-                            + self.distill_lambda * loss_distill 
-                            + self.spatial_distill_lambda * loss_spatial
+                            + (self.distill_lambda * distill_scale) * loss_distill 
+                            + (self.spatial_distill_lambda * distill_scale) * loss_spatial
                             + self.proto_lambda * loss_proto 
                             + self.repel_lambda * loss_repel
                             + 1.0 * loss_recon
