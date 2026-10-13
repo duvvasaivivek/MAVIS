@@ -85,6 +85,7 @@ class MAVISTrainer:
             self.model.train()
             total_loss = 0
             correct = 0
+            task_correct = 0
             total = 0
 
             start_time = time.time()
@@ -117,9 +118,10 @@ class MAVISTrainer:
                         current_features, local_targets
                     )
 
-                    # Task Masking (Only compute CE loss on the neurons active for this task)
-                    active_logits = logits[:, start_cls:end_cls]
-                    loss_ce = self.criterion(active_logits, local_targets)
+                    # Unified Class-Incremental Cross-Entropy (Standard LUCIR / PODNet / WA):
+                    # Trains over all seen classes up to current task [0..end_cls], actively
+                    # suppressing historical class logits on new task inputs while elevating true target.
+                    loss_ce = self.criterion(logits[:, :end_cls], targets)
 
                     # Multi-Anchor Distillation: Anchors to BOTH Task 1 Base E_0 AND Step E_{t-1}
                     if self.old_encoder is not None:
@@ -216,17 +218,22 @@ class MAVISTrainer:
                 scheduler.step()
 
                 total_loss += loss.item() * inputs.size(0)
-                # Accuracy calculation based on all seen logits
+                # 1. Intra-task accuracy (among the 20 classes of the active task)
+                _, task_pred = logits[:, start_cls:end_cls].max(1)
+                task_correct += task_pred.eq(local_targets).sum().item()
+
+                # 2. Unified accuracy (among all seen classes up to current task)
                 _, predicted = logits[:, :end_cls].max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
             epoch_loss = total_loss / total
             epoch_acc = correct / total
+            epoch_task_acc = task_correct / total
             time_taken = time.time() - start_time
 
             print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
-                  f"Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
+                  f"Loss: {epoch_loss:.4f} | TaskAcc: {epoch_task_acc:.4f} | SeenAcc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
 
         # 2. Phase 4: Save Prototypes into Memory Bank (Multi-Prototype K-Means, Lever 1)
         print(f"  [MAVIS] Committing features for Task {task_id + 1} to Memory Bank (K={self.model.memory_bank.prototypes_per_class})...", flush=True)
