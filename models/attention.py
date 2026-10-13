@@ -24,12 +24,14 @@ import math
 class ManualMultiHeadAttention(nn.Module):
     """
     Pure PyTorch implementation of Multi-Head Attention to bypass Triton/FlashAttention C++ compilers.
+    Includes temperature-sharpening to prevent entropy dispersion over hundreds of memory keys.
     """
-    def __init__(self, embed_dim, num_heads, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, dropout=0.1, temperature=0.5):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.temperature = max(0.01, float(temperature))
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
 
         self.q_proj = nn.Linear(embed_dim, embed_dim)
@@ -61,8 +63,8 @@ class ManualMultiHeadAttention(nn.Module):
             k_3d = k.reshape(B * self.num_heads, T_k, self.head_dim).transpose(1, 2)
             v_3d = v.reshape(B * self.num_heads, T_k, self.head_dim)
 
-            # Scaled dot-product attention (3D bmm)
-            scores_3d = torch.bmm(q_3d, k_3d) / math.sqrt(self.head_dim)  # [B*H, T_q, T_k]
+            # Scaled dot-product attention with temperature sharpening (3D bmm)
+            scores_3d = (torch.bmm(q_3d, k_3d) / math.sqrt(self.head_dim)) / self.temperature  # [B*H, T_q, T_k]
             attn_3d = F.softmax(scores_3d, dim=-1)
             attn_3d = self.dropout(attn_3d)
 
@@ -85,13 +87,14 @@ class MemoryAttention(nn.Module):
     """
     Multi-Head Attention that retrieves relevant features from frozen memory prototypes.
     """
-    def __init__(self, feature_dim: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, feature_dim: int, num_heads: int = 4, dropout: float = 0.1, temperature: float = 0.5):
         super().__init__()
         self.feature_dim = feature_dim
         self.mha = ManualMultiHeadAttention(
             embed_dim=feature_dim,
             num_heads=num_heads,
-            dropout=dropout
+            dropout=dropout,
+            temperature=temperature
         )
         self.layer_norm = nn.LayerNorm(feature_dim)
 

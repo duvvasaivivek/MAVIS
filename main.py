@@ -239,11 +239,11 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         epochs_per_task=config.training.epochs_per_task,
         checkpoint_dir=checkpoint_dir,
         device=device,
-        distill_lambda=getattr(config.training, "distill_lambda", 4.0),
-        spatial_distill_lambda=getattr(config.training, "spatial_distill_lambda", 2.0),
+        distill_lambda=getattr(config.training, "distill_lambda", 2.0),
+        spatial_distill_lambda=getattr(config.training, "spatial_distill_lambda", 1.0),
         proto_lambda=getattr(config.training, "proto_lambda", 1.0),
         repel_lambda=getattr(config.training, "repel_lambda", 2.0),
-        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.1),
+        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.25),
         label_smoothing=getattr(config.training, "label_smoothing", 0.05),
         proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0)
     )

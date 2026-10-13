@@ -53,17 +53,17 @@ class TrainingConfig:
     batch_size: int = 128
     epochs_per_task: int = 100
     learning_rate: float = 0.008
-    lr_backbone_factor: float = 0.1  # Backbone LR damping factor for tasks t >= 1
+    lr_backbone_factor: float = 0.25  # Plasticity Rebalance: 0.25x backbone LR for tasks t >= 1 (was 0.10)
     label_smoothing: float = 0.05
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
-    # Continual Learning loss weights (Lever 4 & Cross-Task Repulsion)
-    distill_lambda: float = 4.0
-    spatial_distill_lambda: float = 2.0
+    # Continual Learning loss weights (Plasticity Rebalance: moderated distillation)
+    distill_lambda: float = 2.0         # Feature Distillation to E_0 and E_{t-1} (was 4.0)
+    spatial_distill_lambda: float = 1.0 # Multi-Axis PODNet spatial distillation (was 2.0)
     proto_lambda: float = 1.0
     repel_lambda: float = 2.0
-    proto_replay_lambda: float = 1.0  # Measure 2: Prototype Feature Replay on Classifier Head
+    proto_replay_lambda: float = 1.0    # Gaussian Covariance Prototype Replay
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2
@@ -113,9 +113,9 @@ class MemoryConfig:
     Each entry: (512-D feature, class label, importance score, task_id)
     Memory is fixed-size; adaptive selection replaces least useful entries.
     """
-    capacity: int = 500
+    capacity: int = 1000
     feature_dim: int = 512
-    prototypes_per_class: int = 3  # K=3 sub-clusters per class (Lever 1)
+    prototypes_per_class: int = 5  # Expanded K=5 sub-clusters per class for 67% higher visual coverage
     strategy: str = "adaptive"  # "adaptive", "random", "fifo"
     # Importance scoring weights
     novelty_weight: float = 1.0
@@ -134,12 +134,13 @@ class AttentionConfig:
         Q = W_Q · f_current
         K = W_K · M_memory
         V = W_V · M_memory
-        Retrieved = softmax(QK^T / √d_k) · V
+        Retrieved = softmax(QK^T / (τ · √d_k)) · V
     """
     num_heads: int = 4
     key_dim: int = 256
     query_dim: int = 256
     value_dim: int = 512
+    temperature: float = 0.5  # Temperature-sharpened retrieval to eliminate diluted averaging
     # Heads sweep for experiments
     heads_sweep: list = field(default_factory=lambda: [1, 2, 4, 8])
 

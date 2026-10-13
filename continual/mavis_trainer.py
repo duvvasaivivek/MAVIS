@@ -19,8 +19,8 @@ class MAVISTrainer:
     representation-preserving feature distillation, and Memory Attention retrieval.
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None, distill_lambda: float = 4.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0,
-                 lr_backbone_factor: float = 0.1, spatial_distill_lambda: float = 2.0, label_smoothing: float = 0.05,
+                 checkpoint_dir, device=None, distill_lambda: float = 2.0, proto_lambda: float = 1.0, repel_lambda: float = 2.0,
+                 lr_backbone_factor: float = 0.25, spatial_distill_lambda: float = 1.0, label_smoothing: float = 0.05,
                  proto_replay_lambda: float = 1.0):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -125,12 +125,16 @@ class MAVISTrainer:
                         else:
                             loss_distill = loss_step
 
-                        # Spatial channel pooling distillation (PODNet-style):
+                        # Multi-Axis PODNet spatial distillation (width & height slice pooling)
                         loss_spatial = 0.0
                         for s_curr, s_old in zip(spatials, old_spatials):
-                            pool_curr = F.normalize(s_curr.mean(dim=[2, 3]), p=2, dim=-1)
-                            pool_old = F.normalize(s_old.mean(dim=[2, 3]), p=2, dim=-1)
-                            loss_spatial = loss_spatial + (1.0 - (pool_curr * pool_old).sum(dim=-1)).mean()
+                            w_curr = F.normalize(s_curr.mean(dim=2).flatten(1), p=2, dim=-1)
+                            w_old = F.normalize(s_old.mean(dim=2).flatten(1), p=2, dim=-1)
+                            h_curr = F.normalize(s_curr.mean(dim=3).flatten(1), p=2, dim=-1)
+                            h_old = F.normalize(s_old.mean(dim=3).flatten(1), p=2, dim=-1)
+                            loss_w = (1.0 - (w_curr * w_old).sum(dim=-1)).mean()
+                            loss_h = (1.0 - (h_curr * h_old).sum(dim=-1)).mean()
+                            loss_spatial = loss_spatial + 0.5 * (loss_w + loss_h)
                         loss_spatial = loss_spatial / max(1, len(spatials))
                     else:
                         loss_distill = torch.tensor(0.0, device=self.device)
@@ -163,22 +167,25 @@ class MAVISTrainer:
                         loss_repel = torch.tensor(0.0, device=self.device)
                         loss_recon = torch.tensor(0.0, device=self.device)
 
-                    # Measure 2: Prototype Feature Replay on Classifier Head
-                    past_protos_replay, past_labels_replay = self.model.memory_bank.get_past_prototypes_and_labels(task_id)
+                    # Upgrade Measure 2: Gaussian Feature Covariance Replay on Classifier Head
+                    past_protos_replay, past_labels_replay, past_vars_replay = self.model.memory_bank.get_past_prototypes_and_labels(task_id)
                     if past_protos_replay is not None and past_protos_replay.size(0) > 0:
                         curr_protos = self.model.memory_bank.get_current_task_prototypes()
                         valid_curr = (self.model.memory_bank.running_counts > 0)
                         if valid_curr.any():
                             curr_labels = torch.arange(start_cls, end_cls, device=self.device)[valid_curr]
                             curr_selected = curr_protos[valid_curr]
+                            curr_vars = torch.full_like(curr_selected, 0.01)  # small default variance for live task
                             all_replay_protos = torch.cat([past_protos_replay, curr_selected], dim=0)
                             all_replay_labels = torch.cat([past_labels_replay, curr_labels], dim=0)
+                            all_replay_vars = torch.cat([past_vars_replay, curr_vars], dim=0)
                         else:
                             all_replay_protos = past_protos_replay
                             all_replay_labels = past_labels_replay
+                            all_replay_vars = past_vars_replay
 
-                        # Feature jitter to simulate continuous exemplar distribution around prototypes
-                        proto_noise = 0.02 * torch.randn_like(all_replay_protos)
+                        # Gaussian covariance sampling along true feature variance ellipsoids
+                        proto_noise = torch.randn_like(all_replay_protos) * (torch.sqrt(all_replay_vars) * 0.5)
                         replay_inputs = F.normalize(all_replay_protos + proto_noise, p=2, dim=-1)
                         replay_logits = self.model.classifier(replay_inputs)
                         loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
@@ -291,8 +298,8 @@ class MAVISTrainer:
                         _, pred_ens = ens_scores.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
 
-                        # 4. Measure 3: Hierarchical Memory-Routed Evaluation
-                        # Stage 1: Route query to predicted task using maximum prototype affinity in Memory Bank
+                        # 4. Measure 3 Upgrade: Bayesian Soft Multi-Task Mixture Routing
+                        # Stage 1: Compute task affinity scores from Memory Bank prototypes
                         task_affinities = []
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
@@ -303,15 +310,16 @@ class MAVISTrainer:
                         true_task = targets // classes_per_task
                         correct_task_routing += pred_task.eq(true_task).sum().item()
 
-                        # Stage 2: Within the routed task, pick the best class using intra-task ensemble
-                        pred_hier = torch.zeros_like(targets)
+                        # Stage 2: Bayesian soft mixture across candidate tasks: P(c) = P(Task k) * P(c | Task k)
+                        task_weights = F.softmax(task_affinities / 0.10, dim=1)  # [B, num_tasks_seen]
+                        hier_scores = torch.zeros(inputs.size(0), seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
-                            mask = (pred_task == k)
-                            if mask.any():
-                                k_start = k * classes_per_task
-                                k_end = k_start + classes_per_task
-                                intra_best = ens_scores[mask, k_start:k_end].argmax(dim=1)
-                                pred_hier[mask] = k_start + intra_best
+                            k_start = k * classes_per_task
+                            k_end = k_start + classes_per_task
+                            intra_probs = F.softmax(ens_scores[:, k_start:k_end], dim=1)  # [B, classes_per_task]
+                            hier_scores[:, k_start:k_end] = task_weights[:, k:k+1] * intra_probs
+
+                        _, pred_hier = hier_scores.max(1)
                         correct_hier += pred_hier.eq(targets).sum().item()
                     else:
                         correct_ncm += correct_head

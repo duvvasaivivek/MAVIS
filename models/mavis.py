@@ -54,8 +54,9 @@ class MAVIS(nn.Module):
         prototypes_per_class = getattr(config.memory, "prototypes_per_class", 3)
         self.memory_bank = MemoryBank(feature_dim, num_tasks, classes_per_task, prototypes_per_class=prototypes_per_class)
 
-        # 3. Attention retrieval
-        self.attention = MemoryAttention(feature_dim, num_heads=num_heads, dropout=0.1)
+        # 3. Attention retrieval (with temperature sharpening)
+        attn_temp = getattr(config.attention, "temperature", 0.5)
+        self.attention = MemoryAttention(feature_dim, num_heads=num_heads, dropout=0.1, temperature=attn_temp)
 
         # 4. Gated Fusion
         #    g = sigmoid(W_g * [current ; retrieved] + b_g)

@@ -58,6 +58,7 @@ class MemoryBank(nn.Module):
         # Registered buffers: saved with model state_dict but NOT trained by optimizer
         self.register_buffer("memory", torch.zeros(num_tasks, classes_per_task, prototypes_per_class, feature_dim))
         self.register_buffer("is_populated", torch.zeros(num_tasks, dtype=torch.bool))
+        self.register_buffer("class_variances", torch.zeros(num_tasks, classes_per_task, feature_dim))
 
         # Online running prototypes for the current active task during training
         self.register_buffer("running_prototypes", torch.zeros(classes_per_task, feature_dim))
@@ -77,7 +78,7 @@ class MemoryBank(nn.Module):
                 if self.running_counts[c] == 0:
                     self.running_prototypes[c] = batch_mean
                 else:
-                    self.running_prototypes[c] = 0.9 * self.running_prototypes[c] + 0.1 * batch_mean
+                    self.running_prototypes[c] = 0.92 * self.running_prototypes[c] + 0.08 * batch_mean
                 self.running_counts[c] += 1
 
     def reset_running_prototypes(self):
@@ -100,7 +101,7 @@ class MemoryBank(nn.Module):
     @torch.no_grad()
     def update_memory(self, task_id: int, train_loader, encoder, device):
         """
-        Compute and store K feature prototypes for each class in this task using K-Means.
+        Compute and store K feature prototypes and class variances for each class in this task.
         """
         encoder.eval()
         class_features = [[] for _ in range(self.classes_per_task)]
@@ -116,12 +117,14 @@ class MemoryBank(nn.Module):
                 c = targets[i].item()
                 class_features[c].append(features_cpu[i])
 
-        # Compute K prototypes per class using K-Means clustering
+        # Compute K prototypes per class using K-Means clustering + diagonal feature variances
         for c in range(self.classes_per_task):
             if len(class_features[c]) > 0:
                 c_feats = torch.stack(class_features[c], dim=0)
                 protos_k = kmeans_prototypes(c_feats, k=self.prototypes_per_class, num_iters=10)
                 self.memory[task_id, c] = protos_k.to(self.memory.device)
+                var_c = c_feats.var(dim=0, unbiased=False) + 1e-4
+                self.class_variances[task_id, c] = var_c.to(self.memory.device)
 
         self.is_populated[task_id] = True
         self.reset_running_prototypes()
@@ -147,12 +150,12 @@ class MemoryBank(nn.Module):
 
     def get_past_prototypes_and_labels(self, current_task_id: int):
         """
-        Returns all stored prototypes and their ground-truth class labels
-        for tasks 0..current_task_id-1 (Measure 2: Prototype Feature Replay).
-        Returns (prototypes [N_proto, D], labels [N_proto]).
+        Returns all stored prototypes, class labels, and diagonal variances
+        for tasks 0..current_task_id-1 (Gaussian Feature Covariance Replay).
+        Returns (prototypes [N_proto, D], labels [N_proto], variances [N_proto, D]).
         """
         if current_task_id <= 0:
-            return None, None
+            return None, None, None
 
         valid_indices = []
         for t in range(current_task_id):
@@ -160,7 +163,7 @@ class MemoryBank(nn.Module):
                 valid_indices.append(t)
 
         if len(valid_indices) == 0:
-            return None, None
+            return None, None, None
 
         indices = torch.tensor(valid_indices, device=self.memory.device)
         selected_mem = self.memory[indices]  # [len(valid_indices), classes_per_task, K, D]
@@ -168,12 +171,16 @@ class MemoryBank(nn.Module):
         protos = selected_mem.reshape(num_past_classes * self.prototypes_per_class, self.feature_dim)
 
         task_labels = []
+        task_vars = []
         for t in valid_indices:
             t_labels = torch.arange(t * self.classes_per_task, (t + 1) * self.classes_per_task, device=self.memory.device).repeat_interleave(self.prototypes_per_class)
             task_labels.append(t_labels)
+            t_vars = self.class_variances[t].repeat_interleave(self.prototypes_per_class, dim=0)
+            task_vars.append(t_vars)
         labels = torch.cat(task_labels, dim=0)
+        variances = torch.cat(task_vars, dim=0)
 
-        return protos, labels
+        return protos, labels, variances
 
     def get_training_memories(self, current_task_id: int):
         """
