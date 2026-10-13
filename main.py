@@ -209,7 +209,8 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     from continual.mavis_trainer import MAVISTrainer
 
     print("\n" + "=" * 60)
-    print("Phase 4 & 5: Training MAVIS (Memory + Attention)")
+    mode_str = f"Online EWC λ={config.ewc.ewc_lambda}" if config.ewc.enabled else "EWC Disabled"
+    print(f"Phase 5: Training Full MAVIS (Memory + Attention + {mode_str})")
     print("=" * 60)
 
     device = setup_environment(config)
@@ -231,6 +232,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     model = MAVIS(config)
 
     checkpoint_dir = os.path.join(RESULTS_DIR, "checkpoints", "mavis")
+    ewc_lambda = config.ewc.ewc_lambda if config.ewc.enabled else 0.0
     trainer = MAVISTrainer(
         model=model,
         loader=loader,
@@ -245,7 +247,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         repel_lambda=getattr(config.training, "repel_lambda", 2.0),
         lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.35),
         label_smoothing=getattr(config.training, "label_smoothing", 0.02),
-        proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0)
+        proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0),
+        ewc_lambda=ewc_lambda,
+        fisher_samples=config.ewc.fisher_samples,
+        gamma=getattr(config.ewc, "gamma", 0.95),
     )
 
     # Auto-resume from latest completed task if checkpoint exists
@@ -300,6 +305,16 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                         with open(metrics_ens_ckpt, "r") as f:
                             trainer.accuracy_matrix_ens = json.load(f)
                     
+                    # Restore Online EWC Fisher state from completed Task t
+                    ewc_ckpt_path = os.path.join(checkpoint_dir, f"mavis_ewc_task_{t}.pth")
+                    if os.path.exists(ewc_ckpt_path) and trainer.ewc_module is not None:
+                        try:
+                            ewc_state = torch.load(ewc_ckpt_path, map_location=device)
+                            trainer.ewc_module.load_state_dict(ewc_state)
+                            print(f"[MAVIS] Successfully loaded Online EWC state from Task {t}.", flush=True)
+                        except Exception as e:
+                            print(f"[MAVIS] Note on loading EWC state: {e}", flush=True)
+                    
                     start_task = t
                     if start_task >= config.dataset.num_tasks:
                         print(f"\n[MAVIS] All {config.dataset.num_tasks} tasks already completed in {checkpoint_dir}.")
@@ -324,6 +339,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                         trainer.accuracy_matrix_ncm = []
                         trainer.accuracy_matrix_head = []
                         trainer.accuracy_matrix_ens = []
+                        if trainer.ewc_module is not None:
+                            trainer.ewc_module.running_fisher = None
+                            trainer.ewc_module.saved_params = None
+                            trainer.ewc_module.task_count = 0
                         model = MAVIS(config).to(device)
                         trainer.model = model
                         break
@@ -335,6 +354,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     print(f"        {e}")
                     print(f"[MAVIS] Starting a clean training run from Task 1.\n")
                     start_task = 0
+                    if trainer.ewc_module is not None:
+                        trainer.ewc_module.running_fisher = None
+                        trainer.ewc_module.saved_params = None
+                        trainer.ewc_module.task_count = 0
                     break
 
     for task_id in range(start_task, config.dataset.num_tasks):
@@ -347,6 +370,10 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         print(f"  -> Average Forgetting so far | Hierarchical: {forgetting_hier:.4f} | Ensemble: {forgetting_ens:.4f} | NCM: {forgetting_ncm:.4f} | Head: {forgetting_head:.4f}", flush=True)
 
     final_res = {
+        "ewc_enabled": config.ewc.enabled,
+        "ewc_lambda": ewc_lambda,
+        "gamma": getattr(config.ewc, "gamma", 0.95),
+        "fisher_samples": config.ewc.fisher_samples,
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_accuracy_matrix_hier": trainer.accuracy_matrix_hier,
         "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
@@ -374,7 +401,9 @@ def main():
         help="Command to run",
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
-    parser.add_argument("--epochs", type=int, default=None, help="Override epochs per task (e.g. 30)")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epochs per task (e.g. 50)")
+    parser.add_argument("--ewc-lambda", type=float, default=None, help="Override EWC lambda regularization strength (e.g. 2000.0)")
+    parser.add_argument("--no-ewc", action="store_true", help="Disable EWC regularization in MAVIS (ablation model M3)")
     parser.add_argument("--fresh", action="store_true", help="Start training fresh from Task 1 even if checkpoints exist")
     args = parser.parse_args()
 
@@ -387,6 +416,14 @@ def main():
     if args.epochs is not None:
         config.training.epochs_per_task = args.epochs
         print(f"[Config] Command-line override: epochs_per_task = {args.epochs}")
+
+    if args.ewc_lambda is not None:
+        config.ewc.ewc_lambda = args.ewc_lambda
+        print(f"[Config] Command-line override: ewc_lambda = {args.ewc_lambda}")
+
+    if args.no_ewc:
+        config.ewc.enabled = False
+        print(f"[Config] Command-line override: EWC regularization DISABLED")
 
     # Route command
     if args.command == "config":

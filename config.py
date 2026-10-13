@@ -93,16 +93,17 @@ class EWCConfig:
     Elastic Weight Consolidation — LOSS-LEVEL regularization.
     
     EWC adds a penalty to the loss function during backpropagation:
-        L_total = L_CE + (lambda/2) * Σ F_i * (θ_i − θ_i*)²
+        L_total = L_CE + L_distill + ... + (lambda/2) * Σ F_i * (θ_i − θ_i*)²
     
     It does NOT appear in the forward pass / data flow.
     Fisher values and old parameters are frozen reference tensors.
     """
     enabled: bool = True
-    ewc_lambda: float = 50000.0
+    ewc_lambda: float = 2000.0  # Phase 5 calibrated: in equilibrium with distillation (2.0) and CE (~1.5-2.5)
     fisher_samples: int = 1000
+    gamma: float = 0.95         # Online EWC decay factor for older task Fisher contributions
     # Lambda sweep values for experiments
-    lambda_sweep: list = field(default_factory=lambda: [10, 100, 1000, 5000])
+    lambda_sweep: list = field(default_factory=lambda: [500, 1000, 2000, 5000])
 
 
 @dataclass
@@ -203,7 +204,7 @@ class MAVISConfig:
             f"  Epochs/task:   {self.training.epochs_per_task}",
             f"  Learning rate: {self.training.learning_rate}",
             f"  Feature dim:   {self.encoder.feature_dim}",
-            f"  EWC:           {'ON (λ=' + str(self.ewc.ewc_lambda) + ')' if self.ewc.enabled else 'OFF'}",
+            f"  EWC:           {'ON (lambda=' + str(self.ewc.ewc_lambda) + ')' if self.ewc.enabled else 'OFF'}",
             f"  Memory:        {self.memory.capacity} entries ({self.memory.strategy})",
             f"  Attention:     {self.attention.num_heads} heads (key_dim={self.attention.key_dim})",
             f"  Fusion dim:    {self.fusion.fusion_dim}",

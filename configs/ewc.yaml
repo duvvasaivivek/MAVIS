@@ -1,0 +1,84 @@
+dataset:
+  name: tiny_imagenet
+  data_dir: C:\Users\saivi\Downloads\MAVIS - Memory Augemented Visual Incremental
+    System\data\tiny-imagenet-200
+  image_size: 64
+  num_channels: 3
+  num_classes: 200
+  classes_per_task: 20
+  num_tasks: 10
+  seed: 42
+augmentation:
+  random_flip_horizontal: true
+  random_crop_padding: 4
+  color_jitter: true
+  color_jitter_factor: 0.2
+  random_erasing: false
+  mixup: false
+  cutmix: false
+training:
+  batch_size: 128
+  epochs_per_task: 50
+  learning_rate: 0.008
+  lr_backbone_factor: 0.35
+  label_smoothing: 0.02
+  optimizer: adam
+  mixed_precision: true
+  seed: 42
+  distill_lambda: 2.0
+  spatial_distill_lambda: 1.0
+  proto_lambda: 0.5
+  repel_lambda: 2.0
+  proto_replay_lambda: 1.0
+  smoke_test_epochs: 2
+  smoke_test_tasks: 2
+encoder:
+  feature_dim: 512
+  channels:
+  - 64
+  - 128
+  - 256
+  - 512
+  use_batch_norm: true
+  dropout_rate: 0.5
+classifier:
+  hidden_dim: 256
+  num_classes: 200
+  dropout_rate: 0.3
+ewc:
+  enabled: true
+  ewc_lambda: 2000.0
+  fisher_samples: 1000
+  gamma: 0.95
+  lambda_sweep:
+  - 500
+  - 1000
+  - 2000
+  - 5000
+memory:
+  capacity: 1000
+  feature_dim: 512
+  prototypes_per_class: 5
+  strategy: adaptive
+  novelty_weight: 1.0
+  diversity_weight: 0.5
+  class_balance_weight: 0.5
+  capacity_sweep:
+  - 50
+  - 100
+  - 250
+  - 500
+  - 1000
+attention:
+  num_heads: 4
+  key_dim: 256
+  query_dim: 256
+  value_dim: 512
+  temperature: 0.5
+  heads_sweep:
+  - 1
+  - 2
+  - 4
+  - 8
+fusion:
+  fusion_dim: 512

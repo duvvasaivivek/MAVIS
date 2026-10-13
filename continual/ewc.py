@@ -49,7 +49,10 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
 
         model.zero_grad()
         outputs = model(inputs)
-        log_probs = F.log_softmax(outputs, dim=1)
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        end_cls = (task_id + 1) * classes_per_task
+        log_probs = F.log_softmax(outputs[:, :end_cls], dim=1)
         loss = F.nll_loss(log_probs, targets)
         loss.backward()
 
@@ -83,7 +86,7 @@ class OnlineEWC:
         theta_star = current params after task
     """
 
-    def __init__(self, model, ewc_lambda=1000.0, gamma=0.95):
+    def __init__(self, model, ewc_lambda=2000.0, gamma=0.95):
         """
         Args:
             model: the model to protect
@@ -134,3 +137,23 @@ class OnlineEWC:
                 loss += (self.running_fisher[n] * (p - self.saved_params[n]) ** 2).sum()
 
         return (self.ewc_lambda / 2.0) * loss
+
+    def state_dict(self):
+        """Serialize running Fisher, reference params, and task count."""
+        return {
+            "running_fisher": self.running_fisher,
+            "saved_params": self.saved_params,
+            "task_count": self.task_count,
+            "ewc_lambda": self.ewc_lambda,
+            "gamma": self.gamma,
+        }
+
+    def load_state_dict(self, state_dict):
+        """Restore running Fisher, reference params, and task count."""
+        self.running_fisher = state_dict.get("running_fisher")
+        self.saved_params = state_dict.get("saved_params")
+        self.task_count = state_dict.get("task_count", 0)
+        if "ewc_lambda" in state_dict:
+            self.ewc_lambda = state_dict["ewc_lambda"]
+        if "gamma" in state_dict:
+            self.gamma = state_dict["gamma"]

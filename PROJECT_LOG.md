@@ -129,3 +129,35 @@ This document serves as a living record of architectural decisions, implementati
 3. **Flexible Dynamic Fusion Gate ($[0.05, 0.95]$):** In `models/mavis.py`, updated gate to $0.05 + 0.90 \times \text{raw\_gate}$, allowing up to $95\%$ pure feature routing during training for fine-grained feature learning.
 4. **Label Smoothing Calibration ($0.05 \to 0.02$):** Lowered loss floor to enable loss descent $<0.30$ and drive training accuracy to $>0.90+$.
 5. **Backbone Plasticity Boost for Incremental Tasks (`lr_backbone_factor = 0.35`):** In `config.py`, raised backbone LR factor from 0.25 to 0.35 to eliminate the Task 2 plateau ($49.4\% \to >85\%+$) while maintaining multi-anchor stability.
+
+---
+
+## Phase 5: Full MAVIS Integration (Model M4 - Dual-Level Knowledge Retention)
+**Date:** October 2026
+**Goal:** Implement the complete **Model M4 (Full MAVIS)** architecture by unifying **Parameter-Level Protection** (Online Elastic Weight Consolidation via Fisher Information Matrix) with **Representation-Level Retention** (Neural Memory Bank + Multi-Head Attention + Dynamic Gated Fusion + Multi-Anchor Feature Distillation + Multi-Axis PODNet Spatial Distillation + Gaussian Feature Covariance Replay + Bayesian Soft Multi-Task Mixture Routing).
+
+### 1. Theoretical Motivation & Diagnostic Insight
+- **The Intermediate Task Drift Problem:** In Phase 4 (Model M3), Task 1 retention was high (35.9%–53.8%) due to permanent Base Anchor grounding ($E_0$), and late tasks (Tasks 7–10) were protected by recency. However, intermediate tasks (Tasks 2–4) suffered parameter erosion because representation distillation alone cannot prevent weight vector rotation along unconstrained CNN manifold null spaces.
+- **The Complementary Solution:** Online EWC estimates the diagonal of the empirical Fisher Information Matrix $F_i = \mathbb{E}[(\nabla_{\theta_i} \log p(y|x))^2]$ after each task. High-curvature parameter directions that matter for earlier tasks are penalized under changes ($\frac{\lambda}{2} \sum F_i (\theta_i - \theta_i^*)^2$), forcing the optimizer to learn subsequent tasks strictly within near-zero-curvature orthogonal parameter subspaces.
+
+### 2. Unified Loss Formulation
+The complete loss function during incremental task training is:
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CE}} + (\alpha_t \lambda_{\text{distill}}) \mathcal{L}_{\text{distill}} + (\alpha_t \lambda_{\text{spatial}}) \mathcal{L}_{\text{spatial}} + \lambda_{\text{proto}} \mathcal{L}_{\text{proto}} + \lambda_{\text{repel}} \mathcal{L}_{\text{repel}} + \mathcal{L}_{\text{recon}} + \lambda_{\text{replay}} \mathcal{L}_{\text{replay}} + \mathcal{L}_{\text{EWC}}$$
+where:
+- $\mathcal{L}_{\text{EWC}} = \frac{\lambda_{\text{EWC}}}{2} \sum_{i} F_i (\theta_i - \theta_i^*)^2$ protects CNN backbone, attention projections, fusion gate, and classifier head weights.
+- $F_{\text{running}} \leftarrow \gamma F_{\text{running}} + F_{\text{new\_task}}$ with decay factor $\gamma = 0.95$ (Online EWC).
+
+### 3. Architectural Implementations & Upgrades
+1. **Calibrated EWC Strength ($\lambda_{\text{EWC}} = 2000.0$):**
+   - In standalone EWC (Phase 3), $\lambda = 50,000$ was used because no other retention regularizers were present.
+   - In Phase 5, feature distillation ($\lambda=2.0$) and spatial distillation ($\lambda=1.0$) are already active. Calibrating $\lambda_{\text{EWC}} = 2000.0$ ensures parameter loss ($\approx 0.5$–$1.2$) stays in equilibrium with cross-entropy ($\approx 1.5$–$2.5$) and distillation ($\approx 0.5$–$1.0$) without suffocating plasticity.
+2. **Masked Class-Incremental Log-Likelihood:**
+   - In `continual/ewc.py`, updated `compute_fisher()` to slice logits to seen classes $[0 \dots \text{end\_cls}]$. Unseen future classes receive strictly $0.0$ Fisher penalty, allowing them 100% plasticity when their task arrives.
+3. **Integrated Trainer (`continual/mavis_trainer.py`):**
+   - Added `OnlineEWC` module to `MAVISTrainer`.
+   - Included `loss_ewc` in batch backpropagation and logged `EWC` loss in epoch progress displays.
+   - After locking prototypes and aligning classifier weights, computes Fisher over training data and updates the running Fisher matrix.
+4. **State Persistence & Resumption (`main.py`):**
+   - Saves `mavis_ewc_task_{t}.pth` alongside model weights `mavis_task_{t}.pth`.
+   - Full auto-resumption of model parameters, base anchor $E_0$, memory bank buffers, and Online EWC Fisher state.
+   - Added CLI flags `--ewc-lambda <float>` and `--no-ewc` (for M3 ablation comparison).

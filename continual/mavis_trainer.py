@@ -12,16 +12,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from continual.ewc import OnlineEWC
+
 
 class MAVISTrainer:
     """
     Trains the complete MAVIS architecture with Cosine Linear classification,
-    representation-preserving feature distillation, and Memory Attention retrieval.
+    representation-preserving feature distillation, Memory Attention retrieval,
+    and parameter-level Elastic Weight Consolidation (Phase 5 Full MAVIS).
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
                  checkpoint_dir, device=None, distill_lambda: float = 2.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
                  lr_backbone_factor: float = 0.35, spatial_distill_lambda: float = 1.0, label_smoothing: float = 0.02,
-                 proto_replay_lambda: float = 1.0):
+                 proto_replay_lambda: float = 1.0, ewc_lambda: float = 2000.0, fisher_samples: int = 1000,
+                 gamma: float = 0.95):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -39,8 +43,14 @@ class MAVISTrainer:
         self.proto_lambda = proto_lambda
         self.repel_lambda = repel_lambda
         self.proto_replay_lambda = proto_replay_lambda
+        self.ewc_lambda = ewc_lambda
+        self.fisher_samples = fisher_samples
+        self.gamma = gamma
         self.old_encoder = None
         self.base_encoder = None  # Task 1 base coordinate anchor (E_0)
+
+        # Phase 5: Online EWC module for parameter curvature preservation
+        self.ewc_module = OnlineEWC(model=self.model, ewc_lambda=self.ewc_lambda, gamma=self.gamma) if self.ewc_lambda > 0 else None
 
         self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         self.accuracy_matrix = []       # Primary Continual Learning matrix (Hierarchical)
@@ -52,7 +62,8 @@ class MAVISTrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     def train_task(self, task_id: int):
-        print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} (MAVIS) ---", flush=True)
+        mode_str = f"Full MAVIS (Memory + Attention + EWC λ={self.ewc_lambda})" if (self.ewc_lambda > 0) else "MAVIS (Memory + Attention)"
+        print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} ({mode_str}) ---", flush=True)
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
         # Differential Learning Rates:
@@ -84,6 +95,7 @@ class MAVISTrainer:
         for epoch in range(self.epochs_per_task):
             self.model.train()
             total_loss = 0
+            total_ewc = 0
             correct = 0
             task_correct = 0
             total = 0
@@ -204,13 +216,21 @@ class MAVISTrainer:
                     else:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
 
+                    # Phase 5: Online EWC Penalty (Parameter-Level Curvature Protection)
+                    if self.ewc_module is not None and self.ewc_module.task_count > 0:
+                        loss_ewc = self.ewc_module.penalty(self.model)
+                        total_ewc += loss_ewc.item() * inputs.size(0)
+                    else:
+                        loss_ewc = torch.tensor(0.0, device=self.device)
+
                     loss = (loss_ce 
                             + (self.distill_lambda * distill_scale) * loss_distill 
                             + (self.spatial_distill_lambda * distill_scale) * loss_spatial
                             + self.proto_lambda * loss_proto 
                             + self.repel_lambda * loss_repel
                             + 1.0 * loss_recon
-                            + self.proto_replay_lambda * loss_proto_replay)
+                            + self.proto_replay_lambda * loss_proto_replay
+                            + loss_ewc)
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -232,8 +252,13 @@ class MAVISTrainer:
             epoch_task_acc = task_correct / total
             time_taken = time.time() - start_time
 
-            print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
-                  f"Loss: {epoch_loss:.4f} | TaskAcc: {epoch_task_acc:.4f} | SeenAcc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
+            if self.ewc_module is not None and self.ewc_module.task_count > 0:
+                epoch_ewc = total_ewc / total
+                print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
+                      f"Loss: {epoch_loss:.4f} | EWC: {epoch_ewc:.4f} | TaskAcc: {epoch_task_acc:.4f} | SeenAcc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
+            else:
+                print(f"  Epoch {epoch+1:02d}/{self.epochs_per_task:02d} | "
+                      f"Loss: {epoch_loss:.4f} | TaskAcc: {epoch_task_acc:.4f} | SeenAcc: {epoch_acc:.4f} | Time: {time_taken:.1f}s", flush=True)
 
         # 2. Phase 4: Save Prototypes into Memory Bank (Multi-Prototype K-Means, Lever 1)
         print(f"  [MAVIS] Committing features for Task {task_id + 1} to Memory Bank (K={self.model.memory_bank.prototypes_per_class})...", flush=True)
@@ -261,6 +286,17 @@ class MAVISTrainer:
         self.old_encoder.eval()
         for p in self.old_encoder.parameters():
             p.requires_grad = False
+
+        # 5. Phase 5: Update Online EWC Fisher Information Matrix and parameter snapshot
+        if self.ewc_module is not None:
+            print(f"  [MAVIS EWC] Updating Online Fisher Information Matrix ({self.fisher_samples} samples, gamma={self.gamma})...", flush=True)
+            self.ewc_module.update(
+                self.model, train_loader, self.device,
+                num_samples=self.fisher_samples,
+                task_id=task_id,
+                classes_per_task=self.model.memory_bank.classes_per_task
+            )
+            print(f"  [MAVIS EWC] Fisher Matrix and parameter anchor updated for Task {task_id + 1}.", flush=True)
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()
@@ -365,9 +401,12 @@ class MAVISTrainer:
         self.accuracy_matrix_ncm.append(task_ncm_accuracies)
         self.accuracy_matrix_head.append(task_head_accuracies)
 
-        # Save checkpoint (model weights + accuracy history)
+        # Save checkpoint (model weights + accuracy history + EWC state)
         ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_task_{current_task_id+1}.pth")
         torch.save(self.model.state_dict(), ckpt_path)
+        if self.ewc_module is not None:
+            ewc_ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_ewc_task_{current_task_id+1}.pth")
+            torch.save(self.ewc_module.state_dict(), ewc_ckpt_path)
         metrics_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix.json")
         metrics_hier_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_hier.json")
         metrics_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ens.json")
