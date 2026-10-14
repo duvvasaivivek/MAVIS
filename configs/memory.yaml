@@ -20,16 +20,16 @@ training:
   batch_size: 128
   epochs_per_task: 50
   learning_rate: 0.008
-  lr_backbone_factor: 0.35
+  lr_backbone_factor: 0.1
   label_smoothing: 0.02
   optimizer: adam
   mixed_precision: true
   seed: 42
-  distill_lambda: 2.0
-  spatial_distill_lambda: 1.0
+  distill_lambda: 5.0
+  spatial_distill_lambda: 3.0
   proto_lambda: 0.5
   repel_lambda: 2.0
-  proto_replay_lambda: 1.0
+  proto_replay_lambda: 2.0
   smoke_test_epochs: 2
   smoke_test_tasks: 2
 encoder:
@@ -47,7 +47,7 @@ classifier:
   dropout_rate: 0.3
 ewc:
   enabled: false
-  ewc_lambda: 2000.0
+  ewc_lambda: 5000.0
   fisher_samples: 1000
   gamma: 0.95
   lambda_sweep:

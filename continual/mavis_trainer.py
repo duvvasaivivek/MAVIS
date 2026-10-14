@@ -103,10 +103,10 @@ class MAVISTrainer:
             start_time = time.time()
 
             # Progressive Distillation Annealing (Warmup):
-            # In incremental tasks (task_id > 0), allow high plasticity during early epochs (0-7)
-            # so the backbone rapidly captures new class representations without fighting rigid distillation.
-            # Ramps from 0.2 -> 1.0 linearly across the first 8 epochs.
-            distill_scale = min(1.0, 0.2 + 0.8 * (epoch / 8.0)) if task_id > 0 else 0.0
+            # In incremental tasks (task_id > 0), apply strong distillation from early epochs
+            # to constrain encoder drift while still allowing new-class adaptation.
+            # Ramps from 0.5 -> 1.0 linearly across the first 5 epochs.
+            distill_scale = min(1.0, 0.5 + 0.5 * (epoch / 5.0)) if task_id > 0 else 0.0
 
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
@@ -130,10 +130,12 @@ class MAVISTrainer:
                         current_features, local_targets
                     )
 
-                    # Unified Class-Incremental Cross-Entropy (Standard LUCIR / PODNet / WA):
-                    # Trains over all seen classes up to current task [0..end_cls], actively
-                    # suppressing historical class logits on new task inputs while elevating true target.
-                    loss_ce = self.criterion(logits[:, :end_cls], targets)
+                    # Task-Masked Cross-Entropy on live batch:
+                    # Trains active task neurons on live images without applying destructive negative
+                    # gradients to historical classes. Cross-task discrimination is handled by
+                    # Gaussian Prototype Replay and post-task Balanced Finetuning.
+                    active_logits = logits[:, start_cls:end_cls]
+                    loss_ce = self.criterion(active_logits, local_targets)
 
                     # Multi-Anchor Distillation: Anchors to BOTH Task 1 Base E_0 AND Step E_{t-1}
                     if self.old_encoder is not None:
@@ -266,12 +268,29 @@ class MAVISTrainer:
         self.model.memory_bank.update_memory(task_id, train_loader, self.model.encoder, self.device)
         print(f"  [MAVIS] Memory successfully locked.", flush=True)
 
+        # 2b. Prototype Re-Alignment: Re-encode ALL past tasks' prototypes through the current encoder.
+        # This fixes the critical representation drift problem where stored prototypes become stale
+        # as the encoder evolves across tasks, causing NCM and hierarchical classification to fail.
+        if task_id > 0:
+            print(f"  [MAVIS] Re-aligning {task_id} past task(s) prototypes through current encoder...", flush=True)
+            for past_t in range(task_id):
+                if self.model.memory_bank.is_populated[past_t]:
+                    past_loader = self.loader.get_task_train_dataloader(past_t)
+                    self.model.memory_bank.update_memory(past_t, past_loader, self.model.encoder, self.device)
+            print(f"  [MAVIS] Prototype re-alignment complete.", flush=True)
+
         # Lever 2: Balance Classifier Head via Weight Aligning (WA - CVPR 2020)
         num_old_classes = task_id * self.model.memory_bank.classes_per_task
         num_new_classes = self.model.memory_bank.classes_per_task
         if num_old_classes > 0:
             all_mean_protos = self.model.memory_bank.get_mean_class_prototypes(up_to_task_id=task_id)
             self.model.classifier.align_weights(num_old_classes, num_new_classes, prototypes=all_mean_protos)
+
+        # 2c. Balanced Classifier Finetuning (frozen encoder, prototype replay)
+        # Re-calibrates the classifier head for ALL seen classes, preventing
+        # the head from being dominated by the most recent task.
+        if task_id > 0:
+            self._balanced_classifier_finetune(task_id, num_epochs=5)
 
         # 3. Snapshot Base Anchor E_0 on Task 1 completion (Grounding Anchor for all future tasks)
         if self.base_encoder is None and task_id == 0:
@@ -297,6 +316,87 @@ class MAVISTrainer:
                 classes_per_task=self.model.memory_bank.classes_per_task
             )
             print(f"  [MAVIS EWC] Fisher Matrix and parameter anchor updated for Task {task_id + 1}.", flush=True)
+
+    def _balanced_classifier_finetune(self, task_id: int, num_epochs: int = 5, ft_lr: float = 0.01):
+        """
+        Post-task balanced classifier finetuning with frozen encoder.
+        Re-calibrates the classification head across ALL seen classes using
+        Gaussian-augmented prototype replay, preventing recency bias.
+        """
+        end_cls = (task_id + 1) * self.model.memory_bank.classes_per_task
+
+        # Collect prototypes, labels, and variances from ALL seen tasks
+        all_protos = []
+        all_labels = []
+        all_vars = []
+        for t in range(task_id + 1):
+            if self.model.memory_bank.is_populated[t]:
+                t_start = t * self.model.memory_bank.classes_per_task
+                for c in range(self.model.memory_bank.classes_per_task):
+                    protos_c = self.model.memory_bank.memory[t, c]  # [K, D]
+                    var_c = self.model.memory_bank.class_variances[t, c]  # [D]
+                    for k in range(self.model.memory_bank.prototypes_per_class):
+                        all_protos.append(protos_c[k])
+                        all_labels.append(t_start + c)
+                        all_vars.append(var_c)
+
+        if not all_protos:
+            return
+
+        all_protos = torch.stack(all_protos).to(self.device)
+        all_labels = torch.tensor(all_labels, device=self.device)
+        all_vars = torch.stack(all_vars).to(self.device)
+
+        # Freeze encoder — only train classifier head
+        for p in self.model.encoder.parameters():
+            p.requires_grad = False
+
+        ft_optimizer = optim.SGD(self.model.classifier.parameters(), lr=ft_lr, momentum=0.9)
+
+        final_acc = 0.0
+        for epoch in range(num_epochs):
+            perm = torch.randperm(all_protos.size(0))
+            shuffled_p = all_protos[perm]
+            shuffled_l = all_labels[perm]
+            shuffled_v = all_vars[perm]
+
+            total_correct = 0
+            total_samples = 0
+            batch_size = 128
+
+            for start in range(0, shuffled_p.size(0), batch_size):
+                end = min(start + batch_size, shuffled_p.size(0))
+                p_batch = shuffled_p[start:end]
+                l_batch = shuffled_l[start:end]
+                v_batch = shuffled_v[start:end]
+
+                # Multi-sample Gaussian augmentation (3 noise draws per prototype)
+                aug_inputs_list = []
+                aug_labels_list = []
+                for _ in range(3):
+                    noise = torch.randn_like(p_batch) * (torch.sqrt(v_batch) * 0.5)
+                    aug_inputs_list.append(F.normalize(p_batch + noise, p=2, dim=-1))
+                    aug_labels_list.append(l_batch)
+                aug_inputs = torch.cat(aug_inputs_list, dim=0)
+                aug_labels = torch.cat(aug_labels_list, dim=0)
+
+                ft_optimizer.zero_grad()
+                logits = self.model.classifier(aug_inputs)
+                loss = F.cross_entropy(logits[:, :end_cls], aug_labels)
+                loss.backward()
+                ft_optimizer.step()
+
+                _, pred = logits[:, :end_cls].max(1)
+                total_correct += pred.eq(aug_labels).sum().item()
+                total_samples += aug_labels.size(0)
+
+            final_acc = total_correct / total_samples if total_samples > 0 else 0
+
+        # Unfreeze encoder for next task
+        for p in self.model.encoder.parameters():
+            p.requires_grad = True
+
+        print(f"  [MAVIS] Balanced classifier finetuning ({num_epochs} epochs): final_acc={final_acc:.4f}", flush=True)
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()

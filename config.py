@@ -53,17 +53,17 @@ class TrainingConfig:
     batch_size: int = 128
     epochs_per_task: int = 50  # 50-epoch optimal schedule: drives intra-task training accuracy to >0.90+ while preserving memory stability
     learning_rate: float = 0.008
-    lr_backbone_factor: float = 0.35  # Plasticity Rebalance: 0.35x backbone LR for tasks t >= 1 (was 0.25)
+    lr_backbone_factor: float = 0.1   # Reduced backbone LR: 0.1x for tasks t >= 1 to minimize encoder drift
     label_smoothing: float = 0.02      # Lower loss floor to enable sharp convergence (>0.90+ train acc)
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
     # Continual Learning loss weights (Plasticity Rebalance: moderated distillation)
-    distill_lambda: float = 2.0         # Feature Distillation to E_0 and E_{t-1}
-    spatial_distill_lambda: float = 1.0 # Multi-Axis PODNet spatial distillation
+    distill_lambda: float = 5.0         # Strengthened Feature Distillation to E_0 and E_{t-1}
+    spatial_distill_lambda: float = 3.0 # Strengthened Multi-Axis PODNet spatial distillation
     proto_lambda: float = 0.5           # Relaxed centroid alignment (was 1.0) to preserve sample variance
     repel_lambda: float = 2.0
-    proto_replay_lambda: float = 1.0    # Gaussian Covariance Prototype Replay
+    proto_replay_lambda: float = 2.0    # Strengthened Gaussian Covariance Prototype Replay
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2
@@ -99,7 +99,7 @@ class EWCConfig:
     Fisher values and old parameters are frozen reference tensors.
     """
     enabled: bool = True
-    ewc_lambda: float = 2000.0  # Phase 5 calibrated: in equilibrium with distillation (2.0) and CE (~1.5-2.5)
+    ewc_lambda: float = 5000.0  # Phase 5 strengthened: higher penalty for meaningful parameter protection
     fisher_samples: int = 1000
     gamma: float = 0.95         # Online EWC decay factor for older task Fisher contributions
     # Lambda sweep values for experiments

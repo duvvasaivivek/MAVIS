@@ -247,6 +247,7 @@ class MemoryBank(nn.Module):
         num_tasks = len(valid_tasks)
         num_classes = num_tasks * self.classes_per_task
         protos = self.memory[valid_tasks].view(num_classes * self.prototypes_per_class, self.feature_dim)
+        protos = F.normalize(protos, p=2, dim=1)  # Ensure unit-norm after re-encoding
 
         norm_f = F.normalize(features, p=2, dim=1)
         sim = F.linear(norm_f, protos)
