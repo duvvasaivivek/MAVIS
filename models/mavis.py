@@ -22,6 +22,7 @@ OVERFITTING PREVENTION:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from models.encoder import CNNEncoder
 from models.memory import MemoryBank
 from models.attention import MemoryAttention
@@ -122,3 +123,17 @@ class MAVIS(nn.Module):
         if return_features:
             return logits, current_features, fused_features
         return logits
+
+    def fuse_features(self, current_features: torch.Tensor, memories: torch.Tensor = None) -> torch.Tensor:
+        """
+        Applies Memory Attention and Gated Fusion directly to feature vectors.
+        Harmonizes prototype representations with the inference feature distribution.
+        """
+        if memories is None:
+            memories = self.memory_bank.get_all_populated_memories()
+        retrieved_features = self.attention(current_features, memories)
+        concat = torch.cat([current_features, retrieved_features], dim=1)
+        raw_gate = self.fusion_gate(concat)
+        gate = 0.05 + 0.90 * raw_gate
+        fused = gate * current_features + (1.0 - gate) * retrieved_features
+        return F.normalize(fused, p=2, dim=-1)

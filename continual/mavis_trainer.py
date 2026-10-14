@@ -24,7 +24,7 @@ class MAVISTrainer:
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
                  checkpoint_dir, device=None, distill_lambda: float = 3.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
                  lr_backbone_factor: float = 0.20, spatial_distill_lambda: float = 1.5, label_smoothing: float = 0.02,
-                 proto_replay_lambda: float = 2.0, ewc_lambda: float = 5000.0, fisher_samples: int = 1000,
+                 proto_replay_lambda: float = 2.0, ewc_lambda: float = 5000.0, fisher_samples: int = 2000,
                  gamma: float = 0.95, proto_finetune_epochs: int = 25, proto_finetune_draws: int = 10):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -77,8 +77,11 @@ class MAVISTrainer:
         if task_id == 0:
             optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
         else:
+            # Task-Adaptive Plasticity: Gently decays backbone LR as tasks accumulate (0.20 -> 0.12)
+            # Preserves plastic feature acquisition early on while safeguarding earlier coordinates in late tasks
+            effective_backbone_factor = max(0.12, self.lr_backbone_factor - 0.01 * (task_id - 1))
             optimizer = optim.AdamW([
-                {'params': self.model.encoder.parameters(), 'lr': self.learning_rate * self.lr_backbone_factor},
+                {'params': self.model.encoder.parameters(), 'lr': self.learning_rate * effective_backbone_factor},
                 {'params': self.model.attention.parameters(), 'lr': self.learning_rate},
                 {'params': self.model.fusion_gate.parameters(), 'lr': self.learning_rate},
                 {'params': self.model.classifier.parameters(), 'lr': self.learning_rate}
@@ -357,8 +360,12 @@ class MAVISTrainer:
         all_labels = torch.tensor(all_labels, device=self.device)
         all_vars = torch.stack(all_vars).to(self.device)
 
-        # Freeze encoder — only train classifier head
+        # Freeze encoder, attention, and fusion gate — strictly train classifier head
         for p in self.model.encoder.parameters():
+            p.requires_grad = False
+        for p in self.model.attention.parameters():
+            p.requires_grad = False
+        for p in self.model.fusion_gate.parameters():
             p.requires_grad = False
 
         ft_optimizer = optim.AdamW(self.model.classifier.parameters(), lr=ft_lr, weight_decay=1e-4)
@@ -392,8 +399,14 @@ class MAVISTrainer:
                 aug_inputs = torch.cat(aug_inputs_list, dim=0)
                 aug_labels = torch.cat(aug_labels_list, dim=0)
 
+                # Feature Distribution Alignment: Harmonize prototype replays through Attention & Gated Fusion
+                with torch.no_grad():
+                    fused_aug_inputs = self.model.fuse_features(aug_inputs)
+
                 ft_optimizer.zero_grad()
-                logits = self.model.classifier(aug_inputs, targets=aug_labels)
+                # CRITICAL FIX: Pass targets=None so additive margin (m=0.20) does NOT artificially
+                # subtract from the true class logit and distort post-hoc head calibration!
+                logits = self.model.classifier(fused_aug_inputs, targets=None)
                 loss = F.cross_entropy(logits[:, :end_cls], aug_labels)
                 loss.backward()
                 ft_optimizer.step()
@@ -412,8 +425,12 @@ class MAVISTrainer:
 
         final_acc = epoch_acc
 
-        # Unfreeze encoder for next task
+        # Unfreeze all modules for the next task
         for p in self.model.encoder.parameters():
+            p.requires_grad = True
+        for p in self.model.attention.parameters():
+            p.requires_grad = True
+        for p in self.model.fusion_gate.parameters():
             p.requires_grad = True
 
         print(f"  [MAVIS] Balanced classifier finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
@@ -485,20 +502,24 @@ class MAVISTrainer:
                         correct_ens += pred_ens.eq(targets).sum().item()
                         correct_ens_top5 += calc_topk_correct(ens_scores, targets, k=5)
 
-                        # 4. Measure 3 Upgrade: Bayesian Soft Multi-Task Mixture Routing
-                        # Stage 1: Compute task affinity scores from Memory Bank prototypes
+                        # 4. Measure 3 Upgrade: Robust Bayesian Soft Multi-Task Mixture Routing
+                        # Stage 1: Compute robust task affinity scores from Top-3 Memory Bank prototypes per task
                         task_affinities = []
+                        top_k_proto = min(3, classes_per_task)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
                             k_end = k_start + classes_per_task
-                            task_affinities.append(ncm_scores[:, k_start:k_end].max(dim=1)[0])
+                            # Mean of Top-3 prototypes in task k prevents single-prototype noise from skewing routing
+                            task_k_topk = ncm_scores[:, k_start:k_end].topk(top_k_proto, dim=1)[0].mean(dim=1)
+                            task_affinities.append(task_k_topk)
                         task_affinities = torch.stack(task_affinities, dim=1)  # [B, num_tasks_seen]
                         pred_task = task_affinities.argmax(dim=1)  # [B]
                         true_task = targets // classes_per_task
                         correct_task_routing += pred_task.eq(true_task).sum().item()
 
                         # Stage 2: Bayesian soft mixture across candidate tasks: P(c) = P(Task k) * P(c | Task k)
-                        task_weights = F.softmax(task_affinities / 0.10, dim=1)  # [B, num_tasks_seen]
+                        # Soft temperature T=0.25 prevents extreme zeroing of viable task hypotheses
+                        task_weights = F.softmax(task_affinities / 0.25, dim=1)  # [B, num_tasks_seen]
                         hier_scores = torch.zeros(inputs.size(0), seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
