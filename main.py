@@ -241,13 +241,15 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         epochs_per_task=config.training.epochs_per_task,
         checkpoint_dir=checkpoint_dir,
         device=device,
-        distill_lambda=getattr(config.training, "distill_lambda", 2.0),
-        spatial_distill_lambda=getattr(config.training, "spatial_distill_lambda", 1.0),
+        distill_lambda=getattr(config.training, "distill_lambda", 3.0),
+        spatial_distill_lambda=getattr(config.training, "spatial_distill_lambda", 1.5),
         proto_lambda=getattr(config.training, "proto_lambda", 0.5),
         repel_lambda=getattr(config.training, "repel_lambda", 2.0),
-        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.35),
+        lr_backbone_factor=getattr(config.training, "lr_backbone_factor", 0.20),
         label_smoothing=getattr(config.training, "label_smoothing", 0.02),
-        proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 1.0),
+        proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 2.0),
+        proto_finetune_epochs=getattr(config.training, "proto_finetune_epochs", 25),
+        proto_finetune_draws=getattr(config.training, "proto_finetune_draws", 10),
         ewc_lambda=ewc_lambda,
         fisher_samples=config.ewc.fisher_samples,
         gamma=getattr(config.ewc, "gamma", 0.95),
@@ -304,6 +306,18 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     if os.path.exists(metrics_ens_ckpt):
                         with open(metrics_ens_ckpt, "r") as f:
                             trainer.accuracy_matrix_ens = json.load(f)
+                    metrics_top5_ens_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_ens.json")
+                    if os.path.exists(metrics_top5_ens_ckpt):
+                        with open(metrics_top5_ens_ckpt, "r") as f:
+                            trainer.accuracy_matrix_top5_ens = json.load(f)
+                    metrics_top5_head_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_head.json")
+                    if os.path.exists(metrics_top5_head_ckpt):
+                        with open(metrics_top5_head_ckpt, "r") as f:
+                            trainer.accuracy_matrix_top5_head = json.load(f)
+                    metrics_top5_hier_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_hier.json")
+                    if os.path.exists(metrics_top5_hier_ckpt):
+                        with open(metrics_top5_hier_ckpt, "r") as f:
+                            trainer.accuracy_matrix_top5_hier = json.load(f)
                     
                     # Restore Online EWC Fisher state from completed Task t
                     ewc_ckpt_path = os.path.join(checkpoint_dir, f"mavis_ewc_task_{t}.pth")
@@ -339,6 +353,9 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                         trainer.accuracy_matrix_ncm = []
                         trainer.accuracy_matrix_head = []
                         trainer.accuracy_matrix_ens = []
+                        trainer.accuracy_matrix_top5_ens = []
+                        trainer.accuracy_matrix_top5_head = []
+                        trainer.accuracy_matrix_top5_hier = []
                         if trainer.ewc_module is not None:
                             trainer.ewc_module.running_fisher = None
                             trainer.ewc_module.saved_params = None
@@ -365,9 +382,11 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         trainer.evaluate_all_tasks(task_id)
         forgetting_hier = trainer.compute_forgetting(trainer.accuracy_matrix_hier)
         forgetting_ens = trainer.compute_forgetting(trainer.accuracy_matrix_ens)
+        forgetting_ens_top5 = trainer.compute_forgetting(trainer.accuracy_matrix_top5_ens)
         forgetting_ncm = trainer.compute_forgetting(trainer.accuracy_matrix_ncm)
         forgetting_head = trainer.compute_forgetting(trainer.accuracy_matrix_head)
-        print(f"  -> Average Forgetting so far | Hierarchical: {forgetting_hier:.4f} | Ensemble: {forgetting_ens:.4f} | NCM: {forgetting_ncm:.4f} | Head: {forgetting_head:.4f}", flush=True)
+        forgetting_head_top5 = trainer.compute_forgetting(trainer.accuracy_matrix_top5_head)
+        print(f"  -> Average Forgetting so far | Hierarchical: {forgetting_hier:.4f} | Ensemble: {forgetting_ens:.4f} (Top-5: {forgetting_ens_top5:.4f}) | Head: {forgetting_head:.4f} (Top-5: {forgetting_head_top5:.4f}) | NCM: {forgetting_ncm:.4f}", flush=True)
 
     final_res = {
         "ewc_enabled": config.ewc.enabled,
@@ -379,10 +398,16 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
         "final_accuracy_matrix_ncm": trainer.accuracy_matrix_ncm,
         "final_accuracy_matrix_head": trainer.accuracy_matrix_head,
+        "final_accuracy_matrix_top5_ens": trainer.accuracy_matrix_top5_ens,
+        "final_accuracy_matrix_top5_head": trainer.accuracy_matrix_top5_head,
+        "final_accuracy_matrix_top5_hier": trainer.accuracy_matrix_top5_hier,
         "final_forgetting_hier": trainer.compute_forgetting(trainer.accuracy_matrix_hier),
         "final_forgetting_ens": trainer.compute_forgetting(trainer.accuracy_matrix_ens),
+        "final_forgetting_ens_top5": trainer.compute_forgetting(trainer.accuracy_matrix_top5_ens),
         "final_forgetting_ncm": trainer.compute_forgetting(trainer.accuracy_matrix_ncm),
-        "final_forgetting_head": trainer.compute_forgetting(trainer.accuracy_matrix_head)
+        "final_forgetting_head": trainer.compute_forgetting(trainer.accuracy_matrix_head),
+        "final_forgetting_head_top5": trainer.compute_forgetting(trainer.accuracy_matrix_top5_head),
+        "final_forgetting_hier_top5": trainer.compute_forgetting(trainer.accuracy_matrix_top5_hier)
     }
     res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)

@@ -20,16 +20,18 @@ training:
   batch_size: 128
   epochs_per_task: 50
   learning_rate: 0.008
-  lr_backbone_factor: 0.1
+  lr_backbone_factor: 0.2
   label_smoothing: 0.02
   optimizer: adam
   mixed_precision: true
   seed: 42
-  distill_lambda: 5.0
-  spatial_distill_lambda: 3.0
+  distill_lambda: 3.0
+  spatial_distill_lambda: 1.5
   proto_lambda: 0.5
   repel_lambda: 2.0
   proto_replay_lambda: 2.0
+  proto_finetune_epochs: 25
+  proto_finetune_draws: 10
   smoke_test_epochs: 2
   smoke_test_tasks: 2
 encoder:
@@ -45,6 +47,7 @@ classifier:
   hidden_dim: 256
   num_classes: 200
   dropout_rate: 0.3
+  margin: 0.2
 ewc:
   enabled: true
   ewc_lambda: 5000.0
@@ -56,9 +59,9 @@ ewc:
   - 2000
   - 5000
 memory:
-  capacity: 1000
+  capacity: 1400
   feature_dim: 512
-  prototypes_per_class: 5
+  prototypes_per_class: 7
   strategy: adaptive
   novelty_weight: 1.0
   diversity_weight: 0.5
@@ -69,6 +72,7 @@ memory:
   - 250
   - 500
   - 1000
+  - 1400
 attention:
   num_heads: 4
   key_dim: 256

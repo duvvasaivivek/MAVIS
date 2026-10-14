@@ -51,19 +51,21 @@ class AugmentationConfig:
 class TrainingConfig:
     """Training hyperparameters."""
     batch_size: int = 128
-    epochs_per_task: int = 50  # 50-epoch optimal schedule: drives intra-task training accuracy to >0.90+ while preserving memory stability
+    epochs_per_task: int = 50  # 50-epoch optimal schedule
     learning_rate: float = 0.008
-    lr_backbone_factor: float = 0.1   # Reduced backbone LR: 0.1x for tasks t >= 1 to minimize encoder drift
+    lr_backbone_factor: float = 0.20   # Rebalanced backbone plasticity: 0.20x for tasks t >= 1 (was 0.10)
     label_smoothing: float = 0.02      # Lower loss floor to enable sharp convergence (>0.90+ train acc)
     optimizer: str = "adam"
     mixed_precision: bool = True
     seed: int = 42
     # Continual Learning loss weights (Plasticity Rebalance: moderated distillation)
-    distill_lambda: float = 5.0         # Strengthened Feature Distillation to E_0 and E_{t-1}
-    spatial_distill_lambda: float = 3.0 # Strengthened Multi-Axis PODNet spatial distillation
-    proto_lambda: float = 0.5           # Relaxed centroid alignment (was 1.0) to preserve sample variance
+    distill_lambda: float = 3.0         # Moderated Feature Distillation to E_0 and E_{t-1} (was 5.0)
+    spatial_distill_lambda: float = 1.5 # Moderated Multi-Axis PODNet spatial distillation (was 3.0)
+    proto_lambda: float = 0.5           # Relaxed centroid alignment to preserve sample variance
     repel_lambda: float = 2.0
     proto_replay_lambda: float = 2.0    # Strengthened Gaussian Covariance Prototype Replay
+    proto_finetune_epochs: int = 25     # Deeper balanced classifier finetuning (expanded from 5)
+    proto_finetune_draws: int = 10      # Richer Gaussian feature cloud (10 draws per prototype)
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2
@@ -85,6 +87,7 @@ class ClassifierConfig:
     hidden_dim: int = 256
     num_classes: int = 200
     dropout_rate: float = 0.3
+    margin: float = 0.20  # Additive cosine margin to enforce inter-class angular separation
 
 
 @dataclass
@@ -99,7 +102,7 @@ class EWCConfig:
     Fisher values and old parameters are frozen reference tensors.
     """
     enabled: bool = True
-    ewc_lambda: float = 5000.0  # Phase 5 strengthened: higher penalty for meaningful parameter protection
+    ewc_lambda: float = 5000.0  # Phase 5 calibrated: in equilibrium with distillation and CE
     fisher_samples: int = 1000
     gamma: float = 0.95         # Online EWC decay factor for older task Fisher contributions
     # Lambda sweep values for experiments
@@ -114,16 +117,16 @@ class MemoryConfig:
     Each entry: (512-D feature, class label, importance score, task_id)
     Memory is fixed-size; adaptive selection replaces least useful entries.
     """
-    capacity: int = 1000
+    capacity: int = 1400
     feature_dim: int = 512
-    prototypes_per_class: int = 5  # Expanded K=5 sub-clusters per class for 67% higher visual coverage
+    prototypes_per_class: int = 7  # Expanded K=7 sub-clusters per class for 40% higher visual coverage
     strategy: str = "adaptive"  # "adaptive", "random", "fifo"
     # Importance scoring weights
     novelty_weight: float = 1.0
     diversity_weight: float = 0.5
     class_balance_weight: float = 0.5
     # Budget sweep for experiments
-    capacity_sweep: list = field(default_factory=lambda: [50, 100, 250, 500, 1000])
+    capacity_sweep: list = field(default_factory=lambda: [50, 100, 250, 500, 1000, 1400])
 
 
 @dataclass

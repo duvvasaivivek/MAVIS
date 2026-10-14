@@ -69,10 +69,11 @@ class MAVIS(nn.Module):
         nn.init.zeros_(self.fusion_gate[0].weight)
         nn.init.zeros_(self.fusion_gate[0].bias)
 
-        # 5. Classifier (balanced CosineLinear head)
-        self.classifier = IncrementalClassifier(feature_dim=feature_dim, total_classes=total_classes)
+        # 5. Classifier (balanced CosineLinear head with Cosine Margin)
+        margin = getattr(config.classifier, "margin", 0.20)
+        self.classifier = IncrementalClassifier(feature_dim=feature_dim, total_classes=total_classes, margin=margin)
 
-    def forward(self, x, task_id=None, return_features=False, return_spatials=False):
+    def forward(self, x, task_id=None, targets=None, return_features=False, return_spatials=False):
         """
         Args:
             x: input images [B, 3, 64, 64]
@@ -81,6 +82,7 @@ class MAVIS(nn.Module):
                   Memory retrieval uses tasks 0..task_id-1 plus running prototypes for task_id.
                 - During EVALUATION: pass None.
                   Memory retrieval uses all locked memories.
+            targets: (torch.Tensor or None) Ground truth class targets for additive margin
             return_features: bool, whether to return encoder and fused features
             return_spatials: bool, whether to return intermediate convolutional feature maps
 
@@ -112,8 +114,8 @@ class MAVIS(nn.Module):
         gate = 0.05 + 0.90 * raw_gate
         fused_features = gate * current_features + (1.0 - gate) * retrieved_features
 
-        # 4. Classify from fused features
-        logits = self.classifier(fused_features)
+        # 4. Classify from fused features (targets passed for cosine margin when training)
+        logits = self.classifier(fused_features, targets=targets)
 
         if return_spatials:
             return logits, current_features, fused_features, spatials

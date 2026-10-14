@@ -22,10 +22,10 @@ class MAVISTrainer:
     and parameter-level Elastic Weight Consolidation (Phase 5 Full MAVIS).
     """
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None, distill_lambda: float = 2.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
-                 lr_backbone_factor: float = 0.35, spatial_distill_lambda: float = 1.0, label_smoothing: float = 0.02,
-                 proto_replay_lambda: float = 1.0, ewc_lambda: float = 2000.0, fisher_samples: int = 1000,
-                 gamma: float = 0.95):
+                 checkpoint_dir, device=None, distill_lambda: float = 3.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
+                 lr_backbone_factor: float = 0.20, spatial_distill_lambda: float = 1.5, label_smoothing: float = 0.02,
+                 proto_replay_lambda: float = 2.0, ewc_lambda: float = 5000.0, fisher_samples: int = 1000,
+                 gamma: float = 0.95, proto_finetune_epochs: int = 25, proto_finetune_draws: int = 10):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -46,6 +46,8 @@ class MAVISTrainer:
         self.ewc_lambda = ewc_lambda
         self.fisher_samples = fisher_samples
         self.gamma = gamma
+        self.proto_finetune_epochs = proto_finetune_epochs
+        self.proto_finetune_draws = proto_finetune_draws
         self.old_encoder = None
         self.base_encoder = None  # Task 1 base coordinate anchor (E_0)
 
@@ -53,11 +55,14 @@ class MAVISTrainer:
         self.ewc_module = OnlineEWC(model=self.model, ewc_lambda=self.ewc_lambda, gamma=self.gamma) if self.ewc_lambda > 0 else None
 
         self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-        self.accuracy_matrix = []       # Primary Continual Learning matrix (Hierarchical)
-        self.accuracy_matrix_hier = []  # Measure 3: Hierarchical Memory-Routed Matrix
-        self.accuracy_matrix_ens = []   # Fused Ensemble Matrix
-        self.accuracy_matrix_ncm = []   # NCM Memory Matrix
-        self.accuracy_matrix_head = []  # Aligned Linear Head Matrix
+        self.accuracy_matrix = []            # Primary Continual Learning matrix (Hierarchical)
+        self.accuracy_matrix_hier = []       # Measure 3: Hierarchical Memory-Routed Matrix
+        self.accuracy_matrix_ens = []        # Fused Ensemble Matrix (Top-1)
+        self.accuracy_matrix_ncm = []        # NCM Memory Matrix
+        self.accuracy_matrix_head = []       # Aligned Linear Head Matrix (Top-1)
+        self.accuracy_matrix_top5_ens = []   # Fused Ensemble Matrix (Top-5)
+        self.accuracy_matrix_top5_head = []  # Aligned Linear Head Matrix (Top-5)
+        self.accuracy_matrix_top5_hier = []  # Hierarchical Matrix (Top-5)
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -120,9 +125,9 @@ class MAVISTrainer:
                     targets = targets + start_cls
                     local_targets = targets - start_cls
 
-                    # Pass task_id so model retrieves past memories + current running prototypes, and get spatial features
+                    # Pass task_id so model retrieves past memories + current running prototypes, targets for margin, and get spatial features
                     logits, current_features, fused_features, spatials = self.model(
-                        inputs, task_id=task_id, return_spatials=True
+                        inputs, task_id=task_id, targets=targets, return_spatials=True
                     )
                     
                     # Update online running prototypes for active task (no grad)
@@ -290,7 +295,12 @@ class MAVISTrainer:
         # Re-calibrates the classifier head for ALL seen classes, preventing
         # the head from being dominated by the most recent task.
         if task_id > 0:
-            self._balanced_classifier_finetune(task_id, num_epochs=5)
+            print(f"  [MAVIS] Running Balanced Classifier Finetuning ({self.proto_finetune_epochs} epochs, {self.proto_finetune_draws} draws/proto)...", flush=True)
+            self._balanced_classifier_finetune(
+                task_id,
+                num_epochs=self.proto_finetune_epochs,
+                num_draws=self.proto_finetune_draws
+            )
 
         # 3. Snapshot Base Anchor E_0 on Task 1 completion (Grounding Anchor for all future tasks)
         if self.base_encoder is None and task_id == 0:
@@ -317,7 +327,7 @@ class MAVISTrainer:
             )
             print(f"  [MAVIS EWC] Fisher Matrix and parameter anchor updated for Task {task_id + 1}.", flush=True)
 
-    def _balanced_classifier_finetune(self, task_id: int, num_epochs: int = 5, ft_lr: float = 0.01):
+    def _balanced_classifier_finetune(self, task_id: int, num_epochs: int = 25, num_draws: int = 10, ft_lr: float = 0.005):
         """
         Post-task balanced classifier finetuning with frozen encoder.
         Re-calibrates the classification head across ALL seen classes using
@@ -351,7 +361,8 @@ class MAVISTrainer:
         for p in self.model.encoder.parameters():
             p.requires_grad = False
 
-        ft_optimizer = optim.SGD(self.model.classifier.parameters(), lr=ft_lr, momentum=0.9)
+        ft_optimizer = optim.AdamW(self.model.classifier.parameters(), lr=ft_lr, weight_decay=1e-4)
+        ft_scheduler = optim.lr_scheduler.CosineAnnealingLR(ft_optimizer, T_max=num_epochs, eta_min=1e-5)
 
         final_acc = 0.0
         for epoch in range(num_epochs):
@@ -362,7 +373,8 @@ class MAVISTrainer:
 
             total_correct = 0
             total_samples = 0
-            batch_size = 128
+            total_loss = 0.0
+            batch_size = 256
 
             for start in range(0, shuffled_p.size(0), batch_size):
                 end = min(start + batch_size, shuffled_p.size(0))
@@ -370,18 +382,18 @@ class MAVISTrainer:
                 l_batch = shuffled_l[start:end]
                 v_batch = shuffled_v[start:end]
 
-                # Multi-sample Gaussian augmentation (3 noise draws per prototype)
+                # Multi-sample Gaussian augmentation (num_draws noise draws per prototype)
                 aug_inputs_list = []
                 aug_labels_list = []
-                for _ in range(3):
-                    noise = torch.randn_like(p_batch) * (torch.sqrt(v_batch) * 0.5)
+                for _ in range(num_draws):
+                    noise = torch.randn_like(p_batch) * (torch.sqrt(torch.clamp(v_batch, min=1e-6)) * 0.5)
                     aug_inputs_list.append(F.normalize(p_batch + noise, p=2, dim=-1))
                     aug_labels_list.append(l_batch)
                 aug_inputs = torch.cat(aug_inputs_list, dim=0)
                 aug_labels = torch.cat(aug_labels_list, dim=0)
 
                 ft_optimizer.zero_grad()
-                logits = self.model.classifier(aug_inputs)
+                logits = self.model.classifier(aug_inputs, targets=aug_labels)
                 loss = F.cross_entropy(logits[:, :end_cls], aug_labels)
                 loss.backward()
                 ft_optimizer.step()
@@ -389,21 +401,32 @@ class MAVISTrainer:
                 _, pred = logits[:, :end_cls].max(1)
                 total_correct += pred.eq(aug_labels).sum().item()
                 total_samples += aug_labels.size(0)
+                total_loss += loss.item() * aug_labels.size(0)
 
-            final_acc = total_correct / total_samples if total_samples > 0 else 0
+            ft_scheduler.step()
+            epoch_loss = total_loss / total_samples if total_samples > 0 else 0.0
+            epoch_acc = total_correct / total_samples if total_samples > 0 else 0.0
+
+            if (epoch + 1) % 5 == 0 or epoch == 0 or (epoch + 1) == num_epochs:
+                print(f"    [Finetune Head] Epoch {epoch+1:02d}/{num_epochs:02d} | Loss: {epoch_loss:.4f} | Balanced Proto Acc: {epoch_acc*100:.2f}%", flush=True)
+
+        final_acc = epoch_acc
 
         # Unfreeze encoder for next task
         for p in self.model.encoder.parameters():
             p.requires_grad = True
 
-        print(f"  [MAVIS] Balanced classifier finetuning ({num_epochs} epochs): final_acc={final_acc:.4f}", flush=True)
+        print(f"  [MAVIS] Balanced classifier finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()
         task_head_accuracies = []
+        task_head_top5_accuracies = []
         task_ncm_accuracies = []
         task_ens_accuracies = []
+        task_ens_top5_accuracies = []
         task_hier_accuracies = []
+        task_hier_top5_accuracies = []
         task_routing_accuracies = []
         print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...", flush=True)
 
@@ -411,13 +434,21 @@ class MAVISTrainer:
         classes_per_task = self.model.memory_bank.classes_per_task
         num_tasks_seen = current_task_id + 1
 
+        def calc_topk_correct(scores, targets, k=5):
+            k_val = min(k, scores.size(1))
+            _, topk_preds = scores.topk(k_val, dim=1, largest=True, sorted=True)
+            return topk_preds.eq(targets.unsqueeze(1)).any(dim=1).sum().item()
+
         with torch.no_grad():
             for t in range(current_task_id + 1):
                 val_loader = self.loader.get_task_val_dataloader(t)
                 correct_head = 0
+                correct_head_top5 = 0
                 correct_ncm = 0
                 correct_ens = 0
+                correct_ens_top5 = 0
                 correct_hier = 0
+                correct_hier_top5 = 0
                 correct_task_routing = 0
                 total = 0
 
@@ -434,9 +465,11 @@ class MAVISTrainer:
                         )
                         
                     # 1. Aligned Classifier Head Prediction (Flat across seen classes)
-                    _, pred_head = logits[:, :seen_classes].max(1)
+                    head_scores = logits[:, :seen_classes]
+                    _, pred_head = head_scores.max(1)
                     total += targets.size(0)
                     correct_head += pred_head.eq(targets).sum().item()
+                    correct_head_top5 += calc_topk_correct(head_scores, targets, k=5)
 
                     # 2. Multi-Prototype Nearest Class Mean (NCM) Prediction in prototype space (Flat)
                     ncm_scores = self.model.memory_bank.compute_ncm_scores(
@@ -447,9 +480,10 @@ class MAVISTrainer:
                         correct_ncm += pred_ncm.eq(targets).sum().item()
 
                         # 3. Ensemble Prediction (Flat: Head Logits + Scaled NCM Cosine Scores)
-                        ens_scores = logits[:, :seen_classes] + self.model.classifier.fc.scale * ncm_scores
+                        ens_scores = head_scores + self.model.classifier.fc.scale * ncm_scores
                         _, pred_ens = ens_scores.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
+                        correct_ens_top5 += calc_topk_correct(ens_scores, targets, k=5)
 
                         # 4. Measure 3 Upgrade: Bayesian Soft Multi-Task Mixture Routing
                         # Stage 1: Compute task affinity scores from Memory Bank prototypes
@@ -474,32 +508,44 @@ class MAVISTrainer:
 
                         _, pred_hier = hier_scores.max(1)
                         correct_hier += pred_hier.eq(targets).sum().item()
+                        correct_hier_top5 += calc_topk_correct(hier_scores, targets, k=5)
                     else:
                         correct_ncm += correct_head
                         correct_ens += correct_head
+                        correct_ens_top5 += correct_head_top5
                         correct_hier += correct_head
+                        correct_hier_top5 += correct_head_top5
                         correct_task_routing += targets.size(0)
 
                 head_acc = correct_head / total if total > 0 else 0.0
+                head_top5 = correct_head_top5 / total if total > 0 else 0.0
                 ncm_acc = correct_ncm / total if total > 0 else 0.0
                 ens_acc = correct_ens / total if total > 0 else 0.0
+                ens_top5 = correct_ens_top5 / total if total > 0 else 0.0
                 hier_acc = correct_hier / total if total > 0 else 0.0
+                hier_top5 = correct_hier_top5 / total if total > 0 else 0.0
                 routing_acc = correct_task_routing / total if total > 0 else 0.0
 
                 task_head_accuracies.append(head_acc)
+                task_head_top5_accuracies.append(head_top5)
                 task_ncm_accuracies.append(ncm_acc)
                 task_ens_accuracies.append(ens_acc)
+                task_ens_top5_accuracies.append(ens_top5)
                 task_hier_accuracies.append(hier_acc)
+                task_hier_top5_accuracies.append(hier_top5)
                 task_routing_accuracies.append(routing_acc)
 
-                print(f"  -> Task {t+1} Hierarchical: {hier_acc:.4f} | Ensemble: {ens_acc:.4f} | NCM: {ncm_acc:.4f} | Head: {head_acc:.4f} (Task ID Acc: {routing_acc:.4f})", flush=True)
+                print(f"  -> Task {t+1} Hierarchical: {hier_acc:.4f} (Top-5: {hier_top5:.4f}) | Ensemble: {ens_acc:.4f} (Top-5: {ens_top5:.4f}) | Head: {head_acc:.4f} (Top-5: {head_top5:.4f}) | NCM: {ncm_acc:.4f} [Task Routing: {routing_acc:.4f}]", flush=True)
 
-        # Store primary matrix as Hierarchical (Measure 3)
+        # Store matrices
         self.accuracy_matrix.append(task_hier_accuracies)
         self.accuracy_matrix_hier.append(task_hier_accuracies)
         self.accuracy_matrix_ens.append(task_ens_accuracies)
         self.accuracy_matrix_ncm.append(task_ncm_accuracies)
         self.accuracy_matrix_head.append(task_head_accuracies)
+        self.accuracy_matrix_top5_ens.append(task_ens_top5_accuracies)
+        self.accuracy_matrix_top5_head.append(task_head_top5_accuracies)
+        self.accuracy_matrix_top5_hier.append(task_hier_top5_accuracies)
 
         # Save checkpoint (model weights + accuracy history + EWC state)
         ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_task_{current_task_id+1}.pth")
@@ -512,6 +558,9 @@ class MAVISTrainer:
         metrics_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ens.json")
         metrics_ncm_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_ncm.json")
         metrics_head_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_head.json")
+        metrics_top5_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_ens.json")
+        metrics_top5_head_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_head.json")
+        metrics_top5_hier_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_hier.json")
         import json
         with open(metrics_ckpt, "w") as f:
             json.dump(self.accuracy_matrix, f, indent=2)
@@ -523,6 +572,12 @@ class MAVISTrainer:
             json.dump(self.accuracy_matrix_ncm, f, indent=2)
         with open(metrics_head_ckpt, "w") as f:
             json.dump(self.accuracy_matrix_head, f, indent=2)
+        with open(metrics_top5_ens_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix_top5_ens, f, indent=2)
+        with open(metrics_top5_head_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix_top5_head, f, indent=2)
+        with open(metrics_top5_hier_ckpt, "w") as f:
+            json.dump(self.accuracy_matrix_top5_hier, f, indent=2)
 
     def compute_forgetting(self, matrix=None):
         """Compute average forgetting across all completed tasks."""
