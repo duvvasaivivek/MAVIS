@@ -8,7 +8,7 @@
 ---
 
 ## 📑 Table of Contents
-1. [Executive Summary & Core Objectives (What We Maximize vs. Minimize)](#1-executive-summary--core-objectives)
+1. [Executive Summary & Core Objectives](#1-executive-summary--core-objectives)
 2. [Chronological Journey: Hardships, Hurdles & Breakthroughs](#2-chronological-journey-hardships-hurdles--breakthroughs)
    - [Phase 1: Inception, Framework Migration & Architecture Blueprint](#phase-1-inception-framework-migration--architecture-blueprint)
    - [Phase 2: Data Pipeline & Baseline Collapse (The Plasticity-Stability Dilemma)](#phase-2-data-pipeline--baseline-collapse)
@@ -22,7 +22,7 @@
    - [Component-by-Component Loss Breakdown](#component-by-component-loss-breakdown)
 4. [Exhaustive Hyperparameter Evolution & Parameter Dictionary](#4-exhaustive-hyperparameter-evolution--parameter-dictionary)
 5. [Architectural Anatomy: Dual-Level Protection](#5-architectural-anatomy-dual-level-protection)
-6. [Metric Dynamics & Academic Realities (Top-1 vs. Top-5 vs. Routing)](#6-metric-dynamics--academic-realities)
+6. [Metric Dynamics & Academic Realities](#6-metric-dynamics--academic-realities)
 7. [The Empirical Benchmark Ledger (Job 1 to Job 67)](#7-the-empirical-benchmark-ledger)
 8. [Reproducibility & Operational Playbook](#8-reproducibility--operational-playbook)
 
@@ -264,6 +264,7 @@ To unlock maximum accuracy across all tasks, we implemented the **5 Levers of Pe
 
 ## 3. Full Mathematical Loss Function Taxonomy
 
+### Unified Incremental Objective Function
 During incremental task training ($t \ge 1$), the complete unified objective optimized during every forward-backward step is:
 
 $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CE}} + \alpha_t \left( \lambda_{\text{distill}} \mathcal{L}_{\text{distill}} + \lambda_{\text{spatial}} \mathcal{L}_{\text{spatial}} \right) + \lambda_{\text{proto}} \mathcal{L}_{\text{proto}} + \lambda_{\text{repel}} \mathcal{L}_{\text{repel}} + \mathcal{L}_{\text{recon}} + \lambda_{\text{replay}} \mathcal{L}_{\text{replay}} + \mathcal{L}_{\text{EWC}}$$
