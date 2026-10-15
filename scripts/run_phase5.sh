@@ -19,6 +19,7 @@ COMPILER=/home/lakshum/Duvva_Sai_Vivek/environments/compiler
 export PATH="$VENV/bin:$COMPILER/bin:$PATH"
 export CC=/home/lakshum/Duvva_Sai_Vivek/tools/triton-cc
 export CXX="$COMPILER/bin/x86_64-conda-linux-gnu-g++"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "=========================================="
 echo "MAVIS Phase 5 Training (Full MAVIS: Memory + Attention + EWC)"

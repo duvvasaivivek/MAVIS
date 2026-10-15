@@ -103,11 +103,12 @@ class MemoryAttention(nn.Module):
         self.no_memory_embed = nn.Parameter(torch.zeros(1, feature_dim))
         nn.init.normal_(self.no_memory_embed, mean=0, std=0.01)
 
-    def forward(self, current_features, memory_prototypes):
+    def forward(self, current_features, memory_prototypes, chunk_size: int = 64):
         """
         Args:
             current_features: [B, feature_dim] — live encoder output
             memory_prototypes: [N, feature_dim] — frozen past prototypes, or None
+            chunk_size: maximum query batch size processed at once to strictly bound VRAM
 
         Returns:
             [B, feature_dim] — attention-retrieved features
@@ -117,6 +118,20 @@ class MemoryAttention(nn.Module):
         if memory_prototypes is None:
             # Task 1: no past memories. Return the learned no-memory embedding.
             return self.no_memory_embed.expand(batch_size, -1)
+
+        # Bounded Memory Execution: If batch size exceeds chunk_size, process in chunks
+        # to strictly prevent [B, N, D] tensor materialization from causing GPU OOM on large memory banks.
+        if batch_size > chunk_size:
+            outputs = []
+            for i in range(0, batch_size, chunk_size):
+                q_chunk = current_features[i:i + chunk_size]
+                b_chunk = q_chunk.size(0)
+                query = q_chunk.unsqueeze(1)
+                kv = memory_prototypes.unsqueeze(0).repeat(b_chunk, 1, 1)
+                attn_out, _ = self.mha(query, kv, kv)
+                outputs.append(attn_out.squeeze(1))
+            attn_output = torch.cat(outputs, dim=0)
+            return self.layer_norm(attn_output)
 
         # Reshape for MHA: query=[B,1,D], key/value=[B,N,D]
         query = current_features.unsqueeze(1)                      # [B, 1, D]

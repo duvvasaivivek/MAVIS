@@ -222,7 +222,7 @@ class MAVISTrainer:
                         proto_noise = torch.randn_like(all_replay_protos) * (torch.sqrt(all_replay_vars) * 0.5)
                         replay_inputs = F.normalize(all_replay_protos + proto_noise, p=2, dim=-1)
                         with torch.no_grad():
-                            fused_replay_inputs = self.model.fuse_features(replay_inputs)
+                            fused_replay_inputs = self.model.fuse_features(replay_inputs, chunk_size=64)
                         replay_logits = self.model.classifier(fused_replay_inputs)
                         loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
                     else:
@@ -245,9 +245,12 @@ class MAVISTrainer:
                             + loss_ewc)
 
                 scaler.scale(loss).backward()
+                scale_before = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
+                scale_after = scaler.get_scale()
+                if scale_before <= scale_after:
+                    scheduler.step()
 
                 total_loss += loss.item() * inputs.size(0)
                 # 1. Intra-task accuracy (among the 20 classes of the active task)
@@ -373,6 +376,9 @@ class MAVISTrainer:
         ft_optimizer = optim.AdamW(self.model.classifier.parameters(), lr=ft_lr, weight_decay=1e-4)
         ft_scheduler = optim.lr_scheduler.CosineAnnealingLR(ft_optimizer, T_max=num_epochs, eta_min=1e-5)
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         final_acc = 0.0
         for epoch in range(num_epochs):
             perm = torch.randperm(all_protos.size(0))
@@ -383,7 +389,7 @@ class MAVISTrainer:
             total_correct = 0
             total_samples = 0
             total_loss = 0.0
-            batch_size = 256
+            batch_size = 64  # Bounded mini-batch to prevent OOM on large memory banks
 
             for start in range(0, shuffled_p.size(0), batch_size):
                 end = min(start + batch_size, shuffled_p.size(0))
@@ -403,7 +409,7 @@ class MAVISTrainer:
 
                 # Feature Distribution Alignment: Harmonize prototype replays through Attention & Gated Fusion
                 with torch.no_grad():
-                    fused_aug_inputs = self.model.fuse_features(aug_inputs)
+                    fused_aug_inputs = self.model.fuse_features(aug_inputs, chunk_size=64)
 
                 ft_optimizer.zero_grad()
                 # CRITICAL FIX: Pass targets=None so additive margin (m=0.20) does NOT artificially
@@ -426,6 +432,9 @@ class MAVISTrainer:
                 print(f"    [Finetune Head] Epoch {epoch+1:02d}/{num_epochs:02d} | Loss: {epoch_loss:.4f} | Balanced Proto Acc: {epoch_acc*100:.2f}%", flush=True)
 
         final_acc = epoch_acc
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Unfreeze all modules for the next task
         for p in self.model.encoder.parameters():

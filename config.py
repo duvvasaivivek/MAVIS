@@ -68,7 +68,7 @@ class TrainingConfig:
     repel_lambda: float = 2.0
     proto_replay_lambda: float = 2.0    # Strengthened Gaussian Covariance Prototype Replay
     proto_finetune_epochs: int = 25     # Deeper balanced classifier finetuning (expanded from 5)
-    proto_finetune_draws: int = 10      # Richer Gaussian feature cloud (10 draws per prototype)
+    proto_finetune_draws: int = 5       # Calibrated Gaussian feature cloud (5 draws per prototype)
     # Progressive training stages
     smoke_test_epochs: int = 2
     smoke_test_tasks: int = 2

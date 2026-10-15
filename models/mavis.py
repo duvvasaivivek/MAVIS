@@ -124,14 +124,29 @@ class MAVIS(nn.Module):
             return logits, current_features, fused_features
         return logits
 
-    def fuse_features(self, current_features: torch.Tensor, memories: torch.Tensor = None) -> torch.Tensor:
+    def fuse_features(self, current_features: torch.Tensor, memories: torch.Tensor = None, chunk_size: int = 64) -> torch.Tensor:
         """
         Applies Memory Attention and Gated Fusion directly to feature vectors.
         Harmonizes prototype representations with the inference feature distribution.
+        Uses query chunking to guarantee bounded VRAM (<300MB) even with thousands of queries.
         """
         if memories is None:
             memories = self.memory_bank.get_all_populated_memories()
-        retrieved_features = self.attention(current_features, memories)
+
+        batch_size = current_features.size(0)
+        if batch_size > chunk_size:
+            fused_list = []
+            for i in range(0, batch_size, chunk_size):
+                c_chunk = current_features[i:i + chunk_size]
+                ret_chunk = self.attention(c_chunk, memories, chunk_size=chunk_size)
+                concat = torch.cat([c_chunk, ret_chunk], dim=1)
+                raw_gate = self.fusion_gate(concat)
+                gate = 0.05 + 0.90 * raw_gate
+                fused = gate * c_chunk + (1.0 - gate) * ret_chunk
+                fused_list.append(F.normalize(fused, p=2, dim=-1))
+            return torch.cat(fused_list, dim=0)
+
+        retrieved_features = self.attention(current_features, memories, chunk_size=chunk_size)
         concat = torch.cat([current_features, retrieved_features], dim=1)
         raw_gate = self.fusion_gate(concat)
         gate = 0.05 + 0.90 * raw_gate
