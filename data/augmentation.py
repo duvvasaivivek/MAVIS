@@ -14,6 +14,8 @@ def get_train_transforms(config):
         transform_list.append(transforms.RandomCrop(64, padding=config.random_crop_padding))
     if config.random_flip_horizontal:
         transform_list.append(transforms.RandomHorizontalFlip())
+    if getattr(config, 'random_rotation', False):
+        transform_list.append(transforms.RandomRotation(degrees=getattr(config, 'random_rotation_degrees', 10)))
     if config.color_jitter:
         transform_list.append(transforms.ColorJitter(
             brightness=config.color_jitter_factor,
@@ -24,9 +26,10 @@ def get_train_transforms(config):
         
     transform_list.append(transforms.ToTensor())
     
-    # Gentle Random Erasing if enabled (p=0.2 with small patch scale to preserve 64x64 object details)
+    # Calibrated Random Erasing (Cutout) to prevent single-patch shortcut overfitting
     if getattr(config, 'random_erasing', False):
-        transform_list.append(transforms.RandomErasing(p=0.2, scale=(0.02, 0.20), ratio=(0.3, 3.3), value=0))
+        p_erase = getattr(config, 'random_erasing_prob', 0.25)
+        transform_list.append(transforms.RandomErasing(p=p_erase, scale=(0.02, 0.20), ratio=(0.3, 3.3), value=0))
     
     # ImageNet standard normalization
     transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], 

@@ -41,8 +41,11 @@ class AugmentationConfig:
     random_crop_padding: int = 4
     color_jitter: bool = True
     color_jitter_factor: float = 0.2
-    # Optional (enable after baseline is stable)
-    random_erasing: bool = False
+    # Enhanced visual invariance (active for maximum generalization)
+    random_rotation: bool = True
+    random_rotation_degrees: int = 10
+    random_erasing: bool = True
+    random_erasing_prob: float = 0.25
     mixup: bool = False
     cutmix: bool = False
 
@@ -117,16 +120,16 @@ class MemoryConfig:
     Each entry: (512-D feature, class label, importance score, task_id)
     Memory is fixed-size; adaptive selection replaces least useful entries.
     """
-    capacity: int = 1400
+    capacity: int = 2000
     feature_dim: int = 512
-    prototypes_per_class: int = 7  # Expanded K=7 sub-clusters per class for 40% higher visual coverage
+    prototypes_per_class: int = 10  # Expanded K=10 sub-clusters per class for 43% higher visual coverage
     strategy: str = "adaptive"  # "adaptive", "random", "fifo"
     # Importance scoring weights
     novelty_weight: float = 1.0
     diversity_weight: float = 0.5
     class_balance_weight: float = 0.5
     # Budget sweep for experiments
-    capacity_sweep: list = field(default_factory=lambda: [50, 100, 250, 500, 1000, 1400])
+    capacity_sweep: list = field(default_factory=lambda: [50, 100, 250, 500, 1000, 1400, 2000])
 
 
 @dataclass

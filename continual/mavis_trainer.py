@@ -221,7 +221,9 @@ class MAVISTrainer:
                         # Gaussian covariance sampling along true feature variance ellipsoids
                         proto_noise = torch.randn_like(all_replay_protos) * (torch.sqrt(all_replay_vars) * 0.5)
                         replay_inputs = F.normalize(all_replay_protos + proto_noise, p=2, dim=-1)
-                        replay_logits = self.model.classifier(replay_inputs)
+                        with torch.no_grad():
+                            fused_replay_inputs = self.model.fuse_features(replay_inputs)
+                        replay_logits = self.model.classifier(fused_replay_inputs)
                         loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
                     else:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
@@ -496,8 +498,22 @@ class MAVISTrainer:
                         _, pred_ncm = ncm_scores.max(1)
                         correct_ncm += pred_ncm.eq(targets).sum().item()
 
-                        # 3. Ensemble Prediction (Flat: Head Logits + Scaled NCM Cosine Scores)
-                        ens_scores = head_scores + self.model.classifier.fc.scale * ncm_scores
+                        # 3. Recency-Aware Dynamic Ensemble Prediction
+                        # Class c belongs to task k = c // classes_per_task.
+                        # For recent tasks (delta=0), the linear head is sharpest (e.g. 53.8% on Task 10).
+                        # For older tasks (delta >= 2), frozen NCM memory is invariant (e.g. 24.5% on Task 1).
+                        # Sigmoid gating prevents degraded older heads from polluting preserved memories.
+                        task_deltas = torch.zeros(seen_classes, device=self.device)
+                        for k in range(num_tasks_seen):
+                            k_start = k * classes_per_task
+                            k_end = k_start + classes_per_task
+                            task_deltas[k_start:k_end] = float(current_task_id - k)
+
+                        # alpha = 0.19 at delta=0 (mostly Head), 0.50 at delta=1, 0.81 at delta=2 (mostly NCM)
+                        alpha = torch.sigmoid((task_deltas - 1.0) / 0.70).unsqueeze(0)  # [1, seen_classes]
+                        scale_factor = self.model.classifier.fc.scale
+                        ens_scores = (1.0 - alpha) * head_scores + alpha * (scale_factor * ncm_scores)
+
                         _, pred_ens = ens_scores.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
                         correct_ens_top5 += calc_topk_correct(ens_scores, targets, k=5)
@@ -518,8 +534,8 @@ class MAVISTrainer:
                         correct_task_routing += pred_task.eq(true_task).sum().item()
 
                         # Stage 2: Bayesian soft mixture across candidate tasks: P(c) = P(Task k) * P(c | Task k)
-                        # Soft temperature T=0.25 prevents extreme zeroing of viable task hypotheses
-                        task_weights = F.softmax(task_affinities / 0.25, dim=1)  # [B, num_tasks_seen]
+                        # Calibrated temperature T=0.18 for sharper, more discriminative task routing
+                        task_weights = F.softmax(task_affinities / 0.18, dim=1)  # [B, num_tasks_seen]
                         hier_scores = torch.zeros(inputs.size(0), seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task

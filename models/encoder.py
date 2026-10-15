@@ -11,6 +11,30 @@ Built completely from scratch to ensure:
 import torch
 import torch.nn as nn
 
+class SEBlock(nn.Module):
+    """
+    Squeeze-and-Excitation (SE) Channel Attention block.
+    Dynamically recalibrates channel-wise feature responses by modeling
+    interdependencies between convolutional channels (Hu et al., CVPR 2018).
+    """
+    def __init__(self, channels: int, reduction: int = 16):
+        super(SEBlock, self).__init__()
+        reduced = max(channels // reduction, 8)
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(channels, reduced, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(reduced, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.size()
+        weights = self.fc(x).view(b, c, 1, 1)
+        return x * weights
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -21,6 +45,7 @@ class BasicBlock(nn.Module):
         
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.gn2 = nn.GroupNorm(32, planes)
+        self.se = SEBlock(planes, reduction=16)
 
         self.shortcut = nn.Sequential()
         if stride != 1 or in_planes != self.expansion * planes:
@@ -36,6 +61,7 @@ class BasicBlock(nn.Module):
         out = self.relu(self.gn1(self.conv1(x)))
         out = self.dropout(out)
         out = self.gn2(self.conv2(out))
+        out = self.se(out)
         out += self.shortcut(x)
         out = self.relu(out)
         return out
