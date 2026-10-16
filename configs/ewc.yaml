@@ -13,7 +13,10 @@ augmentation:
   random_crop_padding: 4
   color_jitter: true
   color_jitter_factor: 0.2
-  random_erasing: false
+  random_rotation: true
+  random_rotation_degrees: 10
+  random_erasing: true
+  random_erasing_prob: 0.25
   mixup: false
   cutmix: false
 training:
@@ -31,7 +34,7 @@ training:
   repel_lambda: 2.0
   proto_replay_lambda: 2.0
   proto_finetune_epochs: 25
-  proto_finetune_draws: 10
+  proto_finetune_draws: 5
   smoke_test_epochs: 2
   smoke_test_tasks: 2
 encoder:
@@ -51,7 +54,7 @@ classifier:
 ewc:
   enabled: true
   ewc_lambda: 5000.0
-  fisher_samples: 1000
+  fisher_samples: 2000
   gamma: 0.95
   lambda_sweep:
   - 500
@@ -59,9 +62,9 @@ ewc:
   - 2000
   - 5000
 memory:
-  capacity: 1400
+  capacity: 2000
   feature_dim: 512
-  prototypes_per_class: 7
+  prototypes_per_class: 10
   strategy: adaptive
   novelty_weight: 1.0
   diversity_weight: 0.5
@@ -73,6 +76,7 @@ memory:
   - 500
   - 1000
   - 1400
+  - 2000
 attention:
   num_heads: 4
   key_dim: 256

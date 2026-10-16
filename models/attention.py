@@ -71,16 +71,17 @@ class ManualMultiHeadAttention(nn.Module):
             # Apply attention to values (3D bmm)
             out_3d = torch.bmm(attn_3d, v_3d)  # [B*H, T_q, hd]
             
-            # Reshape back to 4D
+            # Reshape back to 4D and concatenate heads
             out = out_3d.reshape(B, self.num_heads, T_q, self.head_dim)
-
-            # Final linear projection
             out = out.transpose(1, 2).contiguous().view(B, T_q, C)  # [B, T_q, C]
+
+            # Final linear projection in FP32
+            out = self.out_proj(out)
 
             # Restore original dtype
             out = out.to(orig_dtype)
 
-            return self.out_proj(out), attn_3d.reshape(B, self.num_heads, T_q, T_k)
+            return out, attn_3d.reshape(B, self.num_heads, T_q, T_k)
 
 
 class MemoryAttention(nn.Module):
@@ -115,9 +116,9 @@ class MemoryAttention(nn.Module):
         """
         batch_size = current_features.size(0)
 
-        if memory_prototypes is None:
-            # Task 1: no past memories. Return the learned no-memory embedding.
-            return self.no_memory_embed.expand(batch_size, -1)
+        if memory_prototypes is None or memory_prototypes.size(0) == 0:
+            # Task 1: no past memories. Return the learned no-memory embedding in matching dtype.
+            return self.no_memory_embed.to(current_features.dtype).expand(batch_size, -1)
 
         # Bounded Memory Execution: If batch size exceeds chunk_size, process in chunks
         # to strictly prevent [B, N, D] tensor materialization from causing GPU OOM on large memory banks.

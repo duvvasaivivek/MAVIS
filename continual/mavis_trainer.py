@@ -195,8 +195,13 @@ class MAVISTrainer:
                         loss_repel = F.relu(sim_to_past - 0.20).pow(2).mean()
 
                         # Attention Self-Reconstruction Loss (Attention fidelity on past memories)
-                        recon_out = self.model.attention(norm_past, past_protos)
-                        loss_recon = F.mse_loss(recon_out, norm_past)
+                        if norm_past.size(0) > 128:
+                            perm = torch.randperm(norm_past.size(0), device=self.device)[:128]
+                            recon_q = norm_past[perm]
+                        else:
+                            recon_q = norm_past
+                        recon_out = self.model.attention(recon_q, past_protos, chunk_size=64)
+                        loss_recon = F.mse_loss(recon_out, recon_q)
                     else:
                         loss_repel = torch.tensor(0.0, device=self.device)
                         loss_recon = torch.tensor(0.0, device=self.device)

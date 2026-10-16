@@ -258,7 +258,16 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     # Auto-resume from latest completed task if checkpoint exists
     import copy
     start_task = 0
-    if resume:
+    if not resume:
+        print(f"[MAVIS] Starting fresh training run (--fresh specified). Cleaning previous checkpoints in {checkpoint_dir}...\n", flush=True)
+        if os.path.exists(checkpoint_dir):
+            for fname in os.listdir(checkpoint_dir):
+                if fname.startswith("mavis_") or fname.startswith("accuracy_matrix"):
+                    try:
+                        os.remove(os.path.join(checkpoint_dir, fname))
+                    except Exception:
+                        pass
+    else:
         for t in range(config.dataset.num_tasks, 0, -1):
             ckpt_path = os.path.join(checkpoint_dir, f"mavis_task_{t}.pth")
             if os.path.exists(ckpt_path):
@@ -289,35 +298,35 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     metrics_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix.json")
                     if os.path.exists(metrics_ckpt):
                         with open(metrics_ckpt, "r") as f:
-                            trainer.accuracy_matrix = json.load(f)
+                            trainer.accuracy_matrix = json.load(f)[:t]
                     metrics_hier_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_hier.json")
                     if os.path.exists(metrics_hier_ckpt):
                         with open(metrics_hier_ckpt, "r") as f:
-                            trainer.accuracy_matrix_hier = json.load(f)
+                            trainer.accuracy_matrix_hier = json.load(f)[:t]
                     metrics_ncm_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_ncm.json")
                     if os.path.exists(metrics_ncm_ckpt):
                         with open(metrics_ncm_ckpt, "r") as f:
-                            trainer.accuracy_matrix_ncm = json.load(f)
+                            trainer.accuracy_matrix_ncm = json.load(f)[:t]
                     metrics_head_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_head.json")
                     if os.path.exists(metrics_head_ckpt):
                         with open(metrics_head_ckpt, "r") as f:
-                            trainer.accuracy_matrix_head = json.load(f)
+                            trainer.accuracy_matrix_head = json.load(f)[:t]
                     metrics_ens_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_ens.json")
                     if os.path.exists(metrics_ens_ckpt):
                         with open(metrics_ens_ckpt, "r") as f:
-                            trainer.accuracy_matrix_ens = json.load(f)
+                            trainer.accuracy_matrix_ens = json.load(f)[:t]
                     metrics_top5_ens_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_ens.json")
                     if os.path.exists(metrics_top5_ens_ckpt):
                         with open(metrics_top5_ens_ckpt, "r") as f:
-                            trainer.accuracy_matrix_top5_ens = json.load(f)
+                            trainer.accuracy_matrix_top5_ens = json.load(f)[:t]
                     metrics_top5_head_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_head.json")
                     if os.path.exists(metrics_top5_head_ckpt):
                         with open(metrics_top5_head_ckpt, "r") as f:
-                            trainer.accuracy_matrix_top5_head = json.load(f)
+                            trainer.accuracy_matrix_top5_head = json.load(f)[:t]
                     metrics_top5_hier_ckpt = os.path.join(checkpoint_dir, "accuracy_matrix_top5_hier.json")
                     if os.path.exists(metrics_top5_hier_ckpt):
                         with open(metrics_top5_hier_ckpt, "r") as f:
-                            trainer.accuracy_matrix_top5_hier = json.load(f)
+                            trainer.accuracy_matrix_top5_hier = json.load(f)[:t]
                     
                     # Restore Online EWC Fisher state from completed Task t
                     ewc_ckpt_path = os.path.join(checkpoint_dir, f"mavis_ewc_task_{t}.pth")

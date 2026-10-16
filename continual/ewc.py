@@ -134,7 +134,9 @@ class OnlineEWC:
         loss = torch.tensor(0.0, device=next(model.parameters()).device)
         for n, p in model.named_parameters():
             if p.requires_grad and n in self.running_fisher:
-                loss += (self.running_fisher[n] * (p - self.saved_params[n]) ** 2).sum()
+                f_n = self.running_fisher[n].to(p.device)
+                p_star = self.saved_params[n].to(p.device)
+                loss += (f_n * (p - p_star) ** 2).sum()
 
         return (self.ewc_lambda / 2.0) * loss
 

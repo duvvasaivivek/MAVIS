@@ -194,6 +194,13 @@ class MAVISConfig:
             if hasattr(config, section_name) and isinstance(section_data, dict):
                 section_cls = type(getattr(config, section_name))
                 setattr(config, section_name, section_cls(**section_data))
+
+        # Fall back to project data directory if serialized path does not exist on current OS
+        if not os.path.exists(config.dataset.data_dir):
+            default_data_dir = os.path.join(DATA_DIR, "tiny-imagenet-200")
+            if os.path.exists(default_data_dir):
+                config.dataset.data_dir = default_data_dir
+
         print(f"[Config] Loaded from {path}")
         return config
 
