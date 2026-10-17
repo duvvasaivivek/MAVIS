@@ -74,6 +74,9 @@ class MAVIS(nn.Module):
         margin = getattr(config.classifier, "margin", 0.20)
         self.classifier = IncrementalClassifier(feature_dim=feature_dim, total_classes=total_classes, margin=margin)
 
+        # 6. Dedicated Task-ID Router Head (Learned coarse task disambiguation)
+        self.task_router = nn.Linear(feature_dim, num_tasks)
+
     def forward(self, x, task_id=None, targets=None, return_features=False, return_spatials=False):
         """
         Args:
@@ -152,3 +155,10 @@ class MAVIS(nn.Module):
         gate = 0.05 + 0.90 * raw_gate
         fused = gate * current_features + (1.0 - gate) * retrieved_features
         return F.normalize(fused, p=2, dim=-1)
+
+    def route_tasks(self, fused_features: torch.Tensor) -> torch.Tensor:
+        """
+        Computes task classification logits [B, num_tasks] from fused features.
+        Provides learned inter-task boundary discrimination.
+        """
+        return self.task_router(fused_features)

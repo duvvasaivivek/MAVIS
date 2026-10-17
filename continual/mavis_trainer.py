@@ -67,7 +67,7 @@ class MAVISTrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     def train_task(self, task_id: int):
-        mode_str = f"Full MAVIS (Memory + Attention + EWC λ={self.ewc_lambda})" if (self.ewc_lambda > 0) else "MAVIS (Memory + Attention)"
+        mode_str = f"Full MAVIS (Memory + Attention + EWC lambda={self.ewc_lambda})" if (self.ewc_lambda > 0) else "MAVIS (Memory + Attention)"
         print(f"\n[{self.device.upper()}] --- Training Task {task_id + 1} ({mode_str}) ---", flush=True)
         train_loader = self.loader.get_task_train_dataloader(task_id)
 
@@ -84,7 +84,8 @@ class MAVISTrainer:
                 {'params': self.model.encoder.parameters(), 'lr': self.learning_rate * effective_backbone_factor},
                 {'params': self.model.attention.parameters(), 'lr': self.learning_rate},
                 {'params': self.model.fusion_gate.parameters(), 'lr': self.learning_rate},
-                {'params': self.model.classifier.parameters(), 'lr': self.learning_rate}
+                {'params': self.model.classifier.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.task_router.parameters(), 'lr': self.learning_rate}
             ], weight_decay=1e-2)
 
         scheduler = optim.lr_scheduler.OneCycleLR(
@@ -230,8 +231,25 @@ class MAVISTrainer:
                             fused_replay_inputs = self.model.fuse_features(replay_inputs, chunk_size=64)
                         replay_logits = self.model.classifier(fused_replay_inputs)
                         loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
+
+                        # Dedicated Task Router Training on Replay
+                        replay_task_labels = all_replay_labels // self.model.memory_bank.classes_per_task
+                        replay_task_logits = self.model.task_router(fused_replay_inputs)
+                        loss_task_replay = F.cross_entropy(replay_task_logits[:, :task_id + 1], replay_task_labels)
                     else:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
+                        loss_task_replay = torch.tensor(0.0, device=self.device)
+
+                    # Task Router Live Loss (for task_id > 0)
+                    if task_id > 0:
+                        live_task_logits = self.model.task_router(fused_features)
+                        loss_task_live = F.cross_entropy(
+                            live_task_logits[:, :task_id + 1],
+                            torch.full((inputs.size(0),), task_id, dtype=torch.long, device=self.device)
+                        )
+                        loss_task_router = 0.5 * loss_task_live + 0.5 * loss_task_replay
+                    else:
+                        loss_task_router = torch.tensor(0.0, device=self.device)
 
                     # Phase 5: Online EWC Penalty (Parameter-Level Curvature Protection)
                     if self.ewc_module is not None and self.ewc_module.task_count > 0:
@@ -247,6 +265,7 @@ class MAVISTrainer:
                             + self.repel_lambda * loss_repel
                             + 1.0 * loss_recon
                             + self.proto_replay_lambda * loss_proto_replay
+                            + 0.5 * loss_task_router
                             + loss_ewc)
 
                 scaler.scale(loss).backward()
@@ -370,15 +389,20 @@ class MAVISTrainer:
         all_labels = torch.tensor(all_labels, device=self.device)
         all_vars = torch.stack(all_vars).to(self.device)
 
-        # Freeze encoder, attention, and fusion gate — strictly train classifier head
+        # Freeze encoder, attention, and fusion gate — strictly train classifier head & task router
         for p in self.model.encoder.parameters():
             p.requires_grad = False
         for p in self.model.attention.parameters():
             p.requires_grad = False
         for p in self.model.fusion_gate.parameters():
             p.requires_grad = False
+        for p in self.model.classifier.parameters():
+            p.requires_grad = True
+        for p in self.model.task_router.parameters():
+            p.requires_grad = True
 
-        ft_optimizer = optim.AdamW(self.model.classifier.parameters(), lr=ft_lr, weight_decay=1e-4)
+        ft_params = list(self.model.classifier.parameters()) + list(self.model.task_router.parameters())
+        ft_optimizer = optim.AdamW(ft_params, lr=ft_lr, weight_decay=1e-4)
         ft_scheduler = optim.lr_scheduler.CosineAnnealingLR(ft_optimizer, T_max=num_epochs, eta_min=1e-5)
 
         if torch.cuda.is_available():
@@ -420,7 +444,14 @@ class MAVISTrainer:
                 # CRITICAL FIX: Pass targets=None so additive margin (m=0.20) does NOT artificially
                 # subtract from the true class logit and distort post-hoc head calibration!
                 logits = self.model.classifier(fused_aug_inputs, targets=None)
-                loss = F.cross_entropy(logits[:, :end_cls], aug_labels)
+                loss_cls = F.cross_entropy(logits[:, :end_cls], aug_labels)
+                if task_id > 0:
+                    task_logits = self.model.task_router(fused_aug_inputs)
+                    aug_task_labels = aug_labels // self.model.memory_bank.classes_per_task
+                    loss_task = F.cross_entropy(task_logits[:, :task_id + 1], aug_task_labels)
+                    loss = loss_cls + 0.5 * loss_task
+                else:
+                    loss = loss_cls
                 loss.backward()
                 ft_optimizer.step()
 
@@ -441,15 +472,18 @@ class MAVISTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Unfreeze all modules for the next task
         for p in self.model.encoder.parameters():
             p.requires_grad = True
         for p in self.model.attention.parameters():
             p.requires_grad = True
         for p in self.model.fusion_gate.parameters():
             p.requires_grad = True
+        for p in self.model.classifier.parameters():
+            p.requires_grad = True
+        for p in self.model.task_router.parameters():
+            p.requires_grad = True
 
-        print(f"  [MAVIS] Balanced classifier finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
+        print(f"  [MAVIS] Balanced classifier & router finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()
@@ -512,11 +546,12 @@ class MAVISTrainer:
                         _, pred_ncm = ncm_scores.max(1)
                         correct_ncm += pred_ncm.eq(targets).sum().item()
 
-                        # 3. Recency-Aware Dynamic Ensemble Prediction
-                        # Class c belongs to task k = c // classes_per_task.
-                        # For recent tasks (delta=0), the linear head is sharpest (e.g. 53.8% on Task 10).
-                        # For older tasks (delta >= 2), frozen NCM memory is invariant (e.g. 24.5% on Task 1).
-                        # Sigmoid gating prevents degraded older heads from polluting preserved memories.
+                        # 3. Probability-Calibrated Dynamic Ensemble Prediction
+                        # Maps both predictors to well-calibrated class probability distributions on [0, 1]
+                        # Eliminates logit scale disparity and prevents older NCM scores from dominating recent linear heads!
+                        prob_head = F.softmax(head_scores / 1.2, dim=1)
+                        prob_ncm = F.softmax(ncm_scores / 0.05, dim=1)
+
                         task_deltas = torch.zeros(seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
@@ -525,36 +560,42 @@ class MAVISTrainer:
 
                         # alpha = 0.19 at delta=0 (mostly Head), 0.50 at delta=1, 0.81 at delta=2 (mostly NCM)
                         alpha = torch.sigmoid((task_deltas - 1.0) / 0.70).unsqueeze(0)  # [1, seen_classes]
-                        scale_factor = self.model.classifier.fc.scale
-                        ens_scores = (1.0 - alpha) * head_scores + alpha * (scale_factor * ncm_scores)
+                        prob_ens = (1.0 - alpha) * prob_head + alpha * prob_ncm
 
-                        _, pred_ens = ens_scores.max(1)
+                        _, pred_ens = prob_ens.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
-                        correct_ens_top5 += calc_topk_correct(ens_scores, targets, k=5)
+                        correct_ens_top5 += calc_topk_correct(prob_ens, targets, k=5)
 
-                        # 4. Measure 3 Upgrade: Robust Bayesian Soft Multi-Task Mixture Routing
-                        # Stage 1: Compute robust task affinity scores from Top-3 Memory Bank prototypes per task
+                        # 4. Hybrid Learned + Prototype-Affinity Bayesian Soft Multi-Task Mixture Routing
+                        # Stage 1: Compute task affinity scores from Top-3 Memory Bank prototypes per task
                         task_affinities = []
                         top_k_proto = min(3, classes_per_task)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
                             k_end = k_start + classes_per_task
-                            # Mean of Top-3 prototypes in task k prevents single-prototype noise from skewing routing
                             task_k_topk = ncm_scores[:, k_start:k_end].topk(top_k_proto, dim=1)[0].mean(dim=1)
                             task_affinities.append(task_k_topk)
                         task_affinities = torch.stack(task_affinities, dim=1)  # [B, num_tasks_seen]
-                        pred_task = task_affinities.argmax(dim=1)  # [B]
+
+                        # Combine learned task router logits with prototype geometric affinity
+                        if hasattr(self.model, "task_router"):
+                            router_logits = self.model.task_router(fused_features)[:, :num_tasks_seen]
+                            prob_router = F.softmax(router_logits / 0.8, dim=1)
+                            prob_aff = F.softmax(task_affinities / 0.18, dim=1)
+                            task_weights = 0.60 * prob_router + 0.40 * prob_aff
+                        else:
+                            task_weights = F.softmax(task_affinities / 0.18, dim=1)
+
+                        pred_task = task_weights.argmax(dim=1)  # [B]
                         true_task = targets // classes_per_task
                         correct_task_routing += pred_task.eq(true_task).sum().item()
 
                         # Stage 2: Bayesian soft mixture across candidate tasks: P(c) = P(Task k) * P(c | Task k)
-                        # Calibrated temperature T=0.18 for sharper, more discriminative task routing
-                        task_weights = F.softmax(task_affinities / 0.18, dim=1)  # [B, num_tasks_seen]
                         hier_scores = torch.zeros(inputs.size(0), seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
                             k_end = k_start + classes_per_task
-                            intra_probs = F.softmax(ens_scores[:, k_start:k_end], dim=1)  # [B, classes_per_task]
+                            intra_probs = F.softmax(prob_ens[:, k_start:k_end], dim=1)  # [B, classes_per_task]
                             hier_scores[:, k_start:k_end] = task_weights[:, k:k+1] * intra_probs
 
                         _, pred_hier = hier_scores.max(1)

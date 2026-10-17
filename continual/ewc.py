@@ -48,12 +48,24 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
         batch_size = inputs.size(0)
 
         model.zero_grad()
-        outputs = model(inputs)
-        if isinstance(outputs, tuple):
-            outputs = outputs[0]
+        if hasattr(model, "task_router"):
+            outputs = model(inputs, return_features=True)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            fused_features = outputs[2] if isinstance(outputs, tuple) and len(outputs) > 2 else None
+        else:
+            outputs = model(inputs)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            fused_features = None
+
         end_cls = (task_id + 1) * classes_per_task
-        log_probs = F.log_softmax(outputs[:, :end_cls], dim=1)
+        log_probs = F.log_softmax(logits[:, :end_cls], dim=1)
         loss = F.nll_loss(log_probs, targets)
+
+        if hasattr(model, "task_router") and fused_features is not None and task_id > 0:
+            task_targets = targets // classes_per_task
+            task_log_probs = F.log_softmax(model.task_router(fused_features)[:, :task_id + 1], dim=1)
+            loss = loss + 0.5 * F.nll_loss(task_log_probs, task_targets)
+
         loss.backward()
 
         for n, p in model.named_parameters():

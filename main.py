@@ -274,7 +274,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                 print(f"\n[MAVIS] Found checkpoint for completed Task {t} at {ckpt_path}. Checking compatibility...")
                 try:
                     state_dict = torch.load(ckpt_path, map_location=device)
-                    model.load_state_dict(state_dict, strict=True)
+                    model.load_state_dict(state_dict, strict=False)
                     trainer.old_encoder = copy.deepcopy(model.encoder)
                     trainer.old_encoder.eval()
                     for p in trainer.old_encoder.parameters():
@@ -286,7 +286,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                         try:
                             base_state = torch.load(base_ckpt, map_location=device)
                             base_model = MAVIS(config).to(device)
-                            base_model.load_state_dict(base_state, strict=True)
+                            base_model.load_state_dict(base_state, strict=False)
                             trainer.base_encoder = copy.deepcopy(base_model.encoder)
                             trainer.base_encoder.eval()
                             for p in trainer.base_encoder.parameters():
