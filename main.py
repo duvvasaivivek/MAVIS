@@ -252,7 +252,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         proto_finetune_draws=getattr(config.training, "proto_finetune_draws", 10),
         ewc_lambda=ewc_lambda,
         fisher_samples=config.ewc.fisher_samples,
-        gamma=getattr(config.ewc, "gamma", 0.95),
+        gamma=getattr(config.ewc, "gamma", 0.88),
     )
 
     # Auto-resume from latest completed task if checkpoint exists

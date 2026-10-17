@@ -33,7 +33,7 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
         Dictionary mapping parameter name -> Fisher diagonal tensor
     """
     model.eval()
-    fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
+    fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad and "task_router" not in n}
 
     samples_seen = 0
     batches_seen = 0
@@ -48,28 +48,21 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
         batch_size = inputs.size(0)
 
         model.zero_grad()
-        if hasattr(model, "task_router"):
+        if hasattr(model, "attention"):
             outputs = model(inputs, return_features=True)
             logits = outputs[0] if isinstance(outputs, tuple) else outputs
-            fused_features = outputs[2] if isinstance(outputs, tuple) and len(outputs) > 2 else None
         else:
             outputs = model(inputs)
             logits = outputs[0] if isinstance(outputs, tuple) else outputs
-            fused_features = None
 
         end_cls = (task_id + 1) * classes_per_task
         log_probs = F.log_softmax(logits[:, :end_cls], dim=1)
         loss = F.nll_loss(log_probs, targets)
 
-        if hasattr(model, "task_router") and fused_features is not None and task_id > 0:
-            task_targets = targets // classes_per_task
-            task_log_probs = F.log_softmax(model.task_router(fused_features)[:, :task_id + 1], dim=1)
-            loss = loss + 0.5 * F.nll_loss(task_log_probs, task_targets)
-
         loss.backward()
 
         for n, p in model.named_parameters():
-            if p.requires_grad and p.grad is not None:
+            if p.requires_grad and p.grad is not None and "task_router" not in n:
                 fisher[n] += p.grad.detach() ** 2
 
         samples_seen += batch_size
@@ -84,8 +77,8 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
 
 
 def snapshot_params(model):
-    """Save a copy of all current model parameters."""
-    return {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
+    """Save a copy of all current model parameters (excluding unused auxiliary router)."""
+    return {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad and "task_router" not in n}
 
 
 class OnlineEWC:

@@ -107,7 +107,7 @@ class EWCConfig:
     enabled: bool = True
     ewc_lambda: float = 5000.0  # Phase 5 calibrated: in equilibrium with distillation and CE
     fisher_samples: int = 2000
-    gamma: float = 0.95         # Online EWC decay factor for older task Fisher contributions
+    gamma: float = 0.88         # Online EWC decay factor for older task Fisher contributions (calibrated for late-task plasticity)
     # Lambda sweep values for experiments
     lambda_sweep: list = field(default_factory=lambda: [500, 1000, 2000, 5000])
 

@@ -75,17 +75,22 @@ class MAVISTrainer:
         # Task 1: Learn entire network from scratch at full learning_rate (high plasticity)
         # Tasks 2+: Damp backbone LR by lr_backbone_factor (stability), while head/attention have full plasticity
         if task_id == 0:
-            optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-2)
+            trainable_params = [
+                {'params': self.model.encoder.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.attention.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.fusion_gate.parameters(), 'lr': self.learning_rate},
+                {'params': self.model.classifier.parameters(), 'lr': self.learning_rate},
+            ]
+            optimizer = optim.AdamW(trainable_params, lr=self.learning_rate, weight_decay=1e-2)
         else:
-            # Task-Adaptive Plasticity: Gently decays backbone LR as tasks accumulate (0.20 -> 0.12)
+            # Task-Adaptive Plasticity: Gently decays backbone LR as tasks accumulate (0.20 -> 0.15 floor)
             # Preserves plastic feature acquisition early on while safeguarding earlier coordinates in late tasks
-            effective_backbone_factor = max(0.12, self.lr_backbone_factor - 0.01 * (task_id - 1))
+            effective_backbone_factor = max(0.15, self.lr_backbone_factor - 0.007 * (task_id - 1))
             optimizer = optim.AdamW([
                 {'params': self.model.encoder.parameters(), 'lr': self.learning_rate * effective_backbone_factor},
                 {'params': self.model.attention.parameters(), 'lr': self.learning_rate},
                 {'params': self.model.fusion_gate.parameters(), 'lr': self.learning_rate},
                 {'params': self.model.classifier.parameters(), 'lr': self.learning_rate},
-                {'params': self.model.task_router.parameters(), 'lr': self.learning_rate}
             ], weight_decay=1e-2)
 
         scheduler = optim.lr_scheduler.OneCycleLR(
@@ -187,13 +192,17 @@ class MAVISTrainer:
                     else:
                         loss_proto = torch.tensor(0.0, device=self.device)
 
-                    # Historical Memory Contrastive Repulsion + Attention Consistency
+                    # Historical Memory Contrastive Repulsion (Top-K Hard Negatives) + Attention Consistency
                     past_protos = self.model.memory_bank.get_past_memories(task_id)
                     if past_protos is not None and past_protos.size(0) > 0:
                         norm_curr = F.normalize(current_features, p=2, dim=-1)
                         norm_past = F.normalize(past_protos, p=2, dim=-1).detach()
                         sim_to_past = torch.matmul(norm_curr, norm_past.t())
-                        loss_repel = F.relu(sim_to_past - 0.20).pow(2).mean()
+                        # Top-K hard negative repulsion (focus on top 32 closest past prototypes)
+                        # Prevents destructive gradient cancellation across all 1,800+ historical prototypes
+                        k_neg = min(32, norm_past.size(0))
+                        topk_sim, _ = sim_to_past.topk(k_neg, dim=1)
+                        loss_repel = F.relu(topk_sim - 0.20).pow(2).mean()
 
                         # Attention Self-Reconstruction Loss (Attention fidelity on past memories)
                         if norm_past.size(0) > 128:
@@ -207,7 +216,7 @@ class MAVISTrainer:
                         loss_repel = torch.tensor(0.0, device=self.device)
                         loss_recon = torch.tensor(0.0, device=self.device)
 
-                    # Upgrade Measure 2: Gaussian Feature Covariance Replay on Classifier Head
+                    # Upgrade Measure 2: Stratified Balanced Gaussian Feature Replay on Classifier Head
                     past_protos_replay, past_labels_replay, past_vars_replay = self.model.memory_bank.get_past_prototypes_and_labels(task_id)
                     if past_protos_replay is not None and past_protos_replay.size(0) > 0:
                         curr_protos = self.model.memory_bank.get_current_task_prototypes()
@@ -224,24 +233,37 @@ class MAVISTrainer:
                             all_replay_labels = past_labels_replay
                             all_replay_vars = past_vars_replay
 
+                        # Stratified balanced prototype sampling across all seen tasks (O(1) constant scaling)
+                        # Caps replay to 256 prototypes per step, preventing O(T) latency ballooning in late tasks
+                        if all_replay_protos.size(0) > 256:
+                            num_seen_tasks = task_id + 1
+                            per_task = max(1, 256 // num_seen_tasks)
+                            selected_indices = []
+                            for t in range(num_seen_tasks):
+                                t_mask = (all_replay_labels // self.model.memory_bank.classes_per_task) == t
+                                t_indices = torch.where(t_mask)[0]
+                                if len(t_indices) > 0:
+                                    perm = torch.randperm(len(t_indices), device=self.device)[:per_task]
+                                    selected_indices.append(t_indices[perm])
+                            if selected_indices:
+                                sel_idx = torch.cat(selected_indices)
+                                sub_protos = all_replay_protos[sel_idx]
+                                sub_labels = all_replay_labels[sel_idx]
+                                sub_vars = all_replay_vars[sel_idx]
+                            else:
+                                sub_protos, sub_labels, sub_vars = all_replay_protos, all_replay_labels, all_replay_vars
+                        else:
+                            sub_protos, sub_labels, sub_vars = all_replay_protos, all_replay_labels, all_replay_vars
+
                         # Gaussian covariance sampling along true feature variance ellipsoids
-                        proto_noise = torch.randn_like(all_replay_protos) * (torch.sqrt(all_replay_vars) * 0.5)
-                        replay_inputs = F.normalize(all_replay_protos + proto_noise, p=2, dim=-1)
+                        proto_noise = torch.randn_like(sub_protos) * (torch.sqrt(torch.clamp(sub_vars, min=1e-6)) * 0.5)
+                        replay_inputs = F.normalize(sub_protos + proto_noise, p=2, dim=-1)
                         with torch.no_grad():
                             fused_replay_inputs = self.model.fuse_features(replay_inputs, chunk_size=64)
                         replay_logits = self.model.classifier(fused_replay_inputs)
-                        loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], all_replay_labels)
-
-                        # Dedicated Task Router Training on Replay
-                        replay_task_labels = all_replay_labels // self.model.memory_bank.classes_per_task
-                        replay_task_logits = self.model.task_router(fused_replay_inputs)
-                        loss_task_replay = F.cross_entropy(replay_task_logits[:, :task_id + 1], replay_task_labels)
+                        loss_proto_replay = F.cross_entropy(replay_logits[:, :end_cls], sub_labels)
                     else:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
-                        loss_task_replay = torch.tensor(0.0, device=self.device)
-
-                    # Dedicated Task Router Loss (trained exclusively on balanced Gaussian replay prototypes across all seen tasks)
-                    loss_task_router = loss_task_replay
 
                     # Phase 5: Online EWC Penalty (Parameter-Level Curvature Protection)
                     if self.ewc_module is not None and self.ewc_module.task_count > 0:
@@ -257,7 +279,6 @@ class MAVISTrainer:
                             + self.repel_lambda * loss_repel
                             + 1.0 * loss_recon
                             + self.proto_replay_lambda * loss_proto_replay
-                            + 0.5 * loss_task_router
                             + loss_ewc)
 
                 scaler.scale(loss).backward()
@@ -381,7 +402,7 @@ class MAVISTrainer:
         all_labels = torch.tensor(all_labels, device=self.device)
         all_vars = torch.stack(all_vars).to(self.device)
 
-        # Freeze encoder, attention, and fusion gate — strictly train classifier head & task router
+        # Freeze encoder, attention, and fusion gate — strictly train classifier head
         for p in self.model.encoder.parameters():
             p.requires_grad = False
         for p in self.model.attention.parameters():
@@ -391,9 +412,9 @@ class MAVISTrainer:
         for p in self.model.classifier.parameters():
             p.requires_grad = True
         for p in self.model.task_router.parameters():
-            p.requires_grad = True
+            p.requires_grad = False
 
-        ft_params = list(self.model.classifier.parameters()) + list(self.model.task_router.parameters())
+        ft_params = list(self.model.classifier.parameters())
         ft_optimizer = optim.AdamW(ft_params, lr=ft_lr, weight_decay=1e-4)
         ft_scheduler = optim.lr_scheduler.CosineAnnealingLR(ft_optimizer, T_max=num_epochs, eta_min=1e-5)
 
@@ -436,14 +457,7 @@ class MAVISTrainer:
                 # CRITICAL FIX: Pass targets=None so additive margin (m=0.20) does NOT artificially
                 # subtract from the true class logit and distort post-hoc head calibration!
                 logits = self.model.classifier(fused_aug_inputs, targets=None)
-                loss_cls = F.cross_entropy(logits[:, :end_cls], aug_labels)
-                if task_id > 0:
-                    task_logits = self.model.task_router(fused_aug_inputs)
-                    aug_task_labels = aug_labels // self.model.memory_bank.classes_per_task
-                    loss_task = F.cross_entropy(task_logits[:, :task_id + 1], aug_task_labels)
-                    loss = loss_cls + 0.5 * loss_task
-                else:
-                    loss = loss_cls
+                loss = F.cross_entropy(logits[:, :end_cls], aug_labels)
                 loss.backward()
                 ft_optimizer.step()
 
@@ -473,9 +487,9 @@ class MAVISTrainer:
         for p in self.model.classifier.parameters():
             p.requires_grad = True
         for p in self.model.task_router.parameters():
-            p.requires_grad = True
+            p.requires_grad = False
 
-        print(f"  [MAVIS] Balanced classifier & router finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
+        print(f"  [MAVIS] Balanced classifier finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
 
     def evaluate_all_tasks(self, current_task_id: int):
         self.model.eval()
@@ -541,7 +555,7 @@ class MAVISTrainer:
                         # 3. Probability-Calibrated Dynamic Ensemble Prediction
                         # Maps both predictors to well-calibrated class probability distributions on [0, 1]
                         # Eliminates logit scale disparity and prevents older NCM scores from dominating recent linear heads!
-                        prob_head = F.softmax(head_scores / 1.2, dim=1)
+                        prob_head = F.softmax(head_scores / 0.90, dim=1)
                         prob_ncm = F.softmax(ncm_scores / 0.05, dim=1)
 
                         task_deltas = torch.zeros(seen_classes, device=self.device)
@@ -553,6 +567,7 @@ class MAVISTrainer:
                         # alpha = 0.19 at delta=0 (mostly Head), 0.50 at delta=1, 0.81 at delta=2 (mostly NCM)
                         alpha = torch.sigmoid((task_deltas - 1.0) / 0.70).unsqueeze(0)  # [1, seen_classes]
                         prob_ens = (1.0 - alpha) * prob_head + alpha * prob_ncm
+                        prob_ens = prob_ens / prob_ens.sum(dim=1, keepdim=True)  # Strictly normalize to sum to 1.0
 
                         _, pred_ens = prob_ens.max(1)
                         correct_ens += pred_ens.eq(targets).sum().item()
