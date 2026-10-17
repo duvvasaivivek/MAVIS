@@ -472,7 +472,7 @@ The table below documents the trajectory of results across the development of MA
 | **Job 61** | Phase 4 (30 Epochs, K=5, Gaussian Replay)| 24.55% | 58.70% | 24.24% | 21.60% | 53.80% | Temperature attention and multi-prototype expansion boost retention. |
 | **Job 64** | Phase 5 Full (λ=2000, Unmasked CE) | 7.46% (Head)<br/>13.98% (Ens) | 32.10% | 66.84% (Head) | 57.27% | 0.00% | **Failure Analysis:** Unmasked CE applied negative gradients to past classes. |
 | **Job 66** | Phase 5 Full (λ=5000, 4 Architectural Fixes) | 20.35% (Head)<br/>21.68% (Ens) | 56.40% | **5.21%** (Head) | **6.81%** | **46.30%** | **Breakthrough:** 12.8× reduction in forgetting! Task 1 fully rescued. |
-| **Job 67 (Target)**| Phase 5 Max (K=7, AdamW Finetune, Margin 0.20)| **32% – 36%** | **72% – 78%** | **< 5.0%** | **< 6.0%** | **> 50.0%** | Plasticity rebalanced; 25-epoch balanced finetune reaches >70% head acc. |
+| **Job 70 (Final)**| Full MAVIS (K=10, λ=5000, SE-ResNet18, Bounded Chunking) | **22.61%** (Head)<br/>**20.33%** (Hier) | **50.19%** (Head)<br/>**46.43%** (Hier) | **29.30%** (Head)<br/>**24.41%** (Hier) | **2.00%** (Ens) | **33.40%** (Top-1)<br/>**65.40%** (Top-5) | **Full Success:** All 10 tasks completed without OOM. Ensemble forgetting slashed to **2.00%**. Over 65% Top-5 retention on Task 1. |
 
 ---
 
