@@ -240,16 +240,8 @@ class MAVISTrainer:
                         loss_proto_replay = torch.tensor(0.0, device=self.device)
                         loss_task_replay = torch.tensor(0.0, device=self.device)
 
-                    # Task Router Live Loss (for task_id > 0)
-                    if task_id > 0:
-                        live_task_logits = self.model.task_router(fused_features)
-                        loss_task_live = F.cross_entropy(
-                            live_task_logits[:, :task_id + 1],
-                            torch.full((inputs.size(0),), task_id, dtype=torch.long, device=self.device)
-                        )
-                        loss_task_router = 0.5 * loss_task_live + 0.5 * loss_task_replay
-                    else:
-                        loss_task_router = torch.tensor(0.0, device=self.device)
+                    # Dedicated Task Router Loss (trained exclusively on balanced Gaussian replay prototypes across all seen tasks)
+                    loss_task_router = loss_task_replay
 
                     # Phase 5: Online EWC Penalty (Parameter-Level Curvature Protection)
                     if self.ewc_module is not None and self.ewc_module.task_count > 0:
@@ -577,14 +569,19 @@ class MAVISTrainer:
                             task_affinities.append(task_k_topk)
                         task_affinities = torch.stack(task_affinities, dim=1)  # [B, num_tasks_seen]
 
-                        # Combine learned task router logits with prototype geometric affinity
-                        if hasattr(self.model, "task_router"):
-                            router_logits = self.model.task_router(fused_features)[:, :num_tasks_seen]
-                            prob_router = F.softmax(router_logits / 0.8, dim=1)
-                            prob_aff = F.softmax(task_affinities / 0.18, dim=1)
-                            task_weights = 0.60 * prob_router + 0.40 * prob_aff
-                        else:
-                            task_weights = F.softmax(task_affinities / 0.18, dim=1)
+                        # Marginal Task Probability via Law of Total Probability: P(Task k) = sum_{c in Task k} P_ens(c)
+                        task_prob_marginal = []
+                        for k in range(num_tasks_seen):
+                            k_start = k * classes_per_task
+                            k_end = k_start + classes_per_task
+                            task_prob_marginal.append(prob_ens[:, k_start:k_end].sum(dim=1))
+                        prob_marginal = torch.stack(task_prob_marginal, dim=1)  # [B, num_tasks_seen]
+
+                        # Prototype geometric affinity from Top-3 Memory Bank prototypes
+                        prob_aff = F.softmax(task_affinities / 0.18, dim=1)
+
+                        # Balanced Task Weights: 50% Ensemble Marginal Mass + 50% Memory Bank Geometric Affinity
+                        task_weights = 0.50 * prob_marginal + 0.50 * prob_aff
 
                         pred_task = task_weights.argmax(dim=1)  # [B]
                         true_task = targets // classes_per_task
