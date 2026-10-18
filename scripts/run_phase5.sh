@@ -38,7 +38,7 @@ echo "=========================================="
 nvidia-smi || echo "WARNING: nvidia-smi failed; continuing to CUDA training checks."
 
 echo "=========================================="
-echo "Starting MAVIS Phase 5 (EWC lambda=5000.0, gamma=0.95, Re-aligned Prototypes & Balanced Finetuning)..."
+echo "Starting MAVIS Phase 5 (EWC lambda=5000.0, gamma=0.88, Re-aligned Prototypes & Balanced Finetuning)..."
 echo "=========================================="
 
 python main.py train_mavis --fresh

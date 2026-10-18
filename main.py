@@ -65,7 +65,8 @@ def setup_environment(config: MAVISConfig):
 
 def visualize_samples(config: MAVISConfig):
     """Visualize a grid of task samples using matplotlib."""
-    print("[Visualize] Not yet implemented for PyTorch pipeline.")
+    from evaluation.visualize import visualize_task_samples
+    visualize_task_samples(config)
 
 
 def train_baseline(config: MAVISConfig):
@@ -249,7 +250,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         label_smoothing=getattr(config.training, "label_smoothing", 0.02),
         proto_replay_lambda=getattr(config.training, "proto_replay_lambda", 2.0),
         proto_finetune_epochs=getattr(config.training, "proto_finetune_epochs", 25),
-        proto_finetune_draws=getattr(config.training, "proto_finetune_draws", 10),
+        proto_finetune_draws=getattr(config.training, "proto_finetune_draws", 5),
         ewc_lambda=ewc_lambda,
         fisher_samples=config.ewc.fisher_samples,
         gamma=getattr(config.ewc, "gamma", 0.88),
@@ -400,7 +401,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     final_res = {
         "ewc_enabled": config.ewc.enabled,
         "ewc_lambda": ewc_lambda,
-        "gamma": getattr(config.ewc, "gamma", 0.95),
+        "gamma": getattr(config.ewc, "gamma", 0.88),
         "fisher_samples": config.ewc.fisher_samples,
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_accuracy_matrix_hier": trainer.accuracy_matrix_hier,

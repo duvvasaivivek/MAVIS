@@ -603,11 +603,13 @@ class MAVISTrainer:
                         correct_task_routing += pred_task.eq(true_task).sum().item()
 
                         # Stage 2: Bayesian soft mixture across candidate tasks: P(c) = P(Task k) * P(c | Task k)
+                        # Exact conditional probability: P(c | Task k) = P_ens(c) / sum_{c' in Task k} P_ens(c')
                         hier_scores = torch.zeros(inputs.size(0), seen_classes, device=self.device)
                         for k in range(num_tasks_seen):
                             k_start = k * classes_per_task
                             k_end = k_start + classes_per_task
-                            intra_probs = F.softmax(prob_ens[:, k_start:k_end], dim=1)  # [B, classes_per_task]
+                            task_mass = prob_marginal[:, k:k+1].clamp(min=1e-8)
+                            intra_probs = prob_ens[:, k_start:k_end] / task_mass  # [B, classes_per_task]
                             hier_scores[:, k_start:k_end] = task_weights[:, k:k+1] * intra_probs
 
                         _, pred_hier = hier_scores.max(1)

@@ -55,7 +55,7 @@ ewc:
   enabled: true
   ewc_lambda: 5000.0
   fisher_samples: 2000
-  gamma: 0.95
+  gamma: 0.88
   lambda_sweep:
   - 500
   - 1000
