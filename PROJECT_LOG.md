@@ -444,7 +444,35 @@ where:
 | **Task 10** | **51.00%** | **69.30%** | **51.60%** | **67.30%** | **26.30%** | 59.00% | **48.70%** | **62.10%** |
 | **Overall Mean** | **21.47%** | **49.56%** | **21.93%** | **48.98%** | **21.83%** | **29.05%** | **21.96%** | **31.73%** |
 
+---
 
+## Comprehensive Codebase Audit & Publication Readiness (Pre-Job 74)
+**Date:** October 18, 2026
+**Scope:** Exhaustive end-to-end scan across all modules, configuration files, bash scripts, and evaluation pipelines in chronological execution order and filewise structure.
 
+### 1. Critical Finding: Double-Softmax / Dynamic Range Compression in Hierarchical Inference
+- **Module & Line:** [`continual/mavis_trainer.py:L607-613`](file:///continual/mavis_trainer.py#L607-613)
+- **Root Cause:**
+  `prob_ens` is already a calibrated probability distribution on $[0, 1]$ summing to 1.0. Applying `intra_probs = F.softmax(prob_ens[:, k_start:k_end], dim=1)` took the softmax of numbers in $[0, 1]$.
+  Because $e^{p_{max}} / e^{p_{min}} \le e^1 / e^0 \approx 2.718$, the dynamic ratio between a high-confidence class ($p=0.85$) and background noise ($p=0.005$) collapsed from $170\times$ down to $2.3\times$. Furthermore, the 20-class denominator $\sum_{c=1}^{20} e^{p_c} \approx 21.5$ slashed the top-1 intra-task score from $0.85$ down to $0.104$.
+- **Empirical Impact in Job 73:**
+  This single line artificially compressed overall Hierarchical Top-5 accuracy down to **31.73%**, even while Ensemble Top-5 achieved **48.98%** (a 17.25% penalty).
+- **Exact Mathematical Correction:**
+  According to Bayes' rule:
+  $$P(c \mid \text{Task } k) = \frac{P_{\text{ens}}(c)}{\sum_{c' \in \text{Task } k} P_{\text{ens}}(c')} = \frac{P_{\text{ens}}(c)}{P_{\text{marginal}}(\text{Task } k)}$$
+  Implemented as:
+  ```python
+  task_mass = prob_marginal[:, k:k+1].clamp(min=1e-8)
+  intra_probs = prob_ens[:, k_start:k_end] / task_mass
+  hier_scores[:, k_start:k_end] = task_weights[:, k:k+1] * intra_probs
+  ```
+  Verified via unit test [`scratch/test_hierarchical_bayes_fix.py`](file:///scratch/test_hierarchical_bayes_fix.py). The decomposition identity $\sum_c \text{hier\_scores} = 1.0$ holds to machine epsilon ($10^{-6}$), eliminating false runner-up class pollution.
 
+### 2. Configuration & Parameter Consistency
+- **EWC Fisher Decay Factor (`gamma`):** Synchronized to calibrated value `gamma = 0.88` across [`config.py`](file:///config.py), [`configs/mavis.yaml`](file:///configs/mavis.yaml), [`main.py:L403`](file:///main.py#L403), and [`scripts/run_phase5.sh:L41`](file:///scripts/run_phase5.sh#L41).
+- **Balanced Prototype Finetune Noise Draws:** Synchronized default to `proto_finetune_draws = 5` in [`main.py:L252`](file:///main.py#L252) and [`config.py:L71`](file:///config.py#L71).
 
+### 3. Modularity & Tooling Enhancements
+- **Implemented `evaluation/metrics.py`:** Added standalone, vectorized computation of Average Accuracy (ACC), Average Forgetting (F), Backward Transfer (BWT), and Learning Accuracy (LA).
+- **Implemented `evaluation/visualize.py`:** Replaced the stub in [`main.py:visualize_samples`](file:///main.py#L66) with automated task grid rendering (`results/figures/task_samples.png`).
+- **Implemented `experiments/benchmark.py`:** Added comparative markdown benchmark table generation across M1 (Baseline), M2 (EWC), and M4 (Full MAVIS). Windows `cp1252` compatibility validated.
