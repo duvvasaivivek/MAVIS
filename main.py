@@ -232,7 +232,8 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
 
     model = MAVIS(config)
 
-    checkpoint_dir = os.path.join(RESULTS_DIR, "checkpoints", "mavis")
+    sub_dir = "mavis" if config.ewc.enabled else "mavis_m3"
+    checkpoint_dir = os.path.join(RESULTS_DIR, "checkpoints", sub_dir)
     ewc_lambda = config.ewc.ewc_lambda if config.ewc.enabled else 0.0
     trainer = MAVISTrainer(
         model=model,
@@ -419,7 +420,7 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         "final_forgetting_head_top5": trainer.compute_forgetting(trainer.accuracy_matrix_top5_head),
         "final_forgetting_hier_top5": trainer.compute_forgetting(trainer.accuracy_matrix_top5_hier)
     }
-    res_path = os.path.join(RESULTS_DIR, "raw", "mavis_results.json")
+    res_path = os.path.join(RESULTS_DIR, "raw", f"{sub_dir}_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)
     with open(res_path, "w") as f:
         json.dump(final_res, f, indent=2)
