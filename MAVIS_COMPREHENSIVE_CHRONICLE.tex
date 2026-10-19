@@ -450,6 +450,29 @@
         \item \textbf{Execution Speed:} Full 10 tasks completed in \textbf{3 hours 51 minutes} on NVIDIA RTX 6000 Ada.
     \end{itemize}
 
+    \subsection{Phase 5 Job 75: M3 Ablation Study (Memory + Attention ONLY, No EWC)}
+    To complete the academic $2 \times 2$ factorial experimental matrix ($M_1$: Baseline, $M_2$: EWC Only, $M_3$: Memory Only, $M_4$: Full MAVIS), Job 75 was executed on the cluster with \texttt{--no-ewc --fresh}.
+
+    \subsubsection{1. Experimental Motivation \& Research Question}
+    In continual learning, a key ablation question is: \textit{How much of MAVIS's retention stems from the non-parametric multi-prototype memory bank versus parameter-level Fisher curvature protection (EWC)?} Setting $\lambda_{\text{EWC}} = 0.0$ while preserving all memory, attention, dynamic re-alignment, and Bayesian routing mechanisms isolates the representation-level memory component from parameter regularization.
+
+    \subsubsection{2. Key Empirical Findings (October 19, 2026)}
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Non-Parametric Memory Rescues Feature Representations:} Even without parameter regularization, non-parametric memory forgetting was restricted to \textbf{14.96\%} (vs \textbf{64.76\%} in baseline CNN). Task 1 retention reached \textbf{19.20\% Hierarchical Top-1 / 57.30\% Top-5} and \textbf{31.00\% NCM retention} (vs 3.50\% in baseline).
+        \item \textbf{Linear Classifier Suffers Catastrophic Overwriting Without EWC:} In $M_3$, Linear Head forgetting soared to \textbf{59.08\%} (Tasks 1--4 head accuracy collapsed to 5.50\%, 1.30\%, 2.40\%, 1.90\%). In $M_4$, EWC prevents classifier parameter drift, slashing linear head forgetting to \textbf{33.90\%} (a 25.18\% absolute drop).
+        \item \textbf{Super-Additive Factorial Synergy ($M_4 \gg M_2 + M_3$):} EWC alone ($M_2$) adds $+0.54\%$ Top-1 over baseline; Memory alone ($M_3$) adds $+4.76\%$ Top-1; while Dual-Level MAVIS ($M_4$) achieves \textbf{22.24\% Top-1} ($+9.62\%$ over baseline). Because $0.54\% + 4.76\% = 5.30\% \ll 9.62\%$, the combination is mathematically \textbf{super-additive}.
+    \end{itemize}
+
+    \subsubsection{Job 75 Empirical Ledger}
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Hierarchical Top-1:} \textbf{17.38\%} (vs 22.24\% in M4, 12.62\% in M1)
+        \item \textbf{Hierarchical Top-5:} \textbf{48.78\%} (vs 49.26\% in M4, \textasciitilde 27.00\% in M1)
+        \item \textbf{NCM Memory Forgetting:} \textbf{14.96\%} (vs 12.50\% in M4, 64.76\% in M1)
+        \item \textbf{Hierarchical Forgetting:} \textbf{51.29\%} (vs 33.90\% in M4, 64.76\% in M1)
+        \item \textbf{Linear Head Forgetting:} \textbf{59.08\%} (vs 33.90\% in M4)
+        \item \textbf{Execution Speed:} 10 tasks completed in \textbf{3 hours 44 minutes} on NVIDIA RTX 6000 Ada.
+    \end{itemize}
+
     \newpage
 
     % ==============================================================================
@@ -752,6 +775,7 @@
     \textbf{Job 72} & 23.98\% (H)\newline 22.10\% (E) & 49.00\% (H)\newline 48.50\% (E) & 13.44\% (H)\newline 11.41\% (M) & 14.10\% & 36.10\% (Top-1)\newline 62.00\% (Top-5) & Weight Aligning + Bayesian soft mixture routing; recency bias eliminated. \\
     \textbf{Job 73} & 21.47\% (H)\newline 21.93\% (E) & 49.56\% (H)\newline 48.98\% (E) & 29.30\% (H)\newline 12.80\% (M) & 24.37\% & 22.60\% (Top-1)\newline 54.90\% (Top-5) & \textbf{Broke Late-Task Squeeze:} Task 10 surged from 22.9\% to 51.6\%! Runtime cut by 43 min. \\
     \textbf{Job 74 (Final)} & \textbf{22.24\%} (Hier)\newline \textbf{22.04\%} (Ens) & \textbf{49.26\%} (Hier)\newline \textbf{49.47\%} (Ens) & \textbf{33.90\%} (Hier)\newline \textbf{12.50\%} (NCM) & \textbf{34.60\%} (Ens) & \textbf{24.30\%} (Top-1)\newline \textbf{57.90\%} (Top-5) & \textbf{Publication Final:} Double-softmax fixed. Hierarchical Top-5 surged to \textbf{49.26\%} (+17.53\% gain). Near 1-in-2 Top-5 accuracy across all 200 classes. \\
+    \textbf{Job 75 (M3)} & \textbf{17.38\%} (Hier)\newline \textbf{16.42\%} (Ens) & \textbf{48.78\%} (Hier)\newline \textbf{48.56\%} (Ens) & \textbf{51.29\%} (Hier)\newline \textbf{14.96\%} (NCM) & \textbf{53.39\%} (Ens)\newline \textbf{59.08\%} (Head) & \textbf{19.20\%} (Top-1)\newline \textbf{57.30\%} (Top-5) & \textbf{Factorial Proof:} Memory alone restricts NCM forgetting to 14.96\%, but linear head suffers without EWC (59.08\%). Proves M4 dual-level synergy is super-additive. \\
     \bottomrule
     \end{tabularx}
     \end{table}

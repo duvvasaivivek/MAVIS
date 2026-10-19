@@ -9,8 +9,12 @@ Aggregates and formats benchmark comparisons across all 4 core configurations:
 """
 
 import os
+import sys
 import json
 from typing import Dict, Any
+
+# Ensure project root is on sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def load_result(results_dir: str, filename: str) -> Dict[str, Any]:
@@ -28,6 +32,7 @@ def generate_benchmark_table(results_dir: str) -> str:
     baseline = load_result(results_dir, "baseline_results.json")
     ewc = load_result(results_dir, "ewc_results.json")
     mavis = load_result(results_dir, "mavis_results.json")
+    mavis_m3 = load_result(results_dir, "mavis_m3_results.json")
 
     rows = []
 
@@ -40,6 +45,11 @@ def generate_benchmark_table(results_dir: str) -> str:
         e_acc = compute_average_accuracy(ewc["final_accuracy_matrix"]) * 100
         e_forg = ewc.get("final_forgetting", compute_forgetting(ewc["final_accuracy_matrix"])) * 100
         rows.append(f"| M2: CNN + EWC | EWC (lambda={ewc.get('ewc_lambda', 5000)}) | None | {e_acc:.2f}% | {e_forg:.2f}% |")
+
+    if mavis_m3 and "final_accuracy_matrix_hier" in mavis_m3:
+        m3_hier_acc = compute_average_accuracy(mavis_m3["final_accuracy_matrix_hier"]) * 100
+        m3_hier_forg = mavis_m3.get("final_forgetting_hier", compute_forgetting(mavis_m3["final_accuracy_matrix_hier"])) * 100
+        rows.append(f"| M3: MAVIS (Memory Only, No EWC) | None | Memory Bank (K=10) | {m3_hier_acc:.2f}% | {m3_hier_forg:.2f}% |")
 
     if mavis and "final_accuracy_matrix_hier" in mavis:
         m_hier_acc = compute_average_accuracy(mavis["final_accuracy_matrix_hier"]) * 100

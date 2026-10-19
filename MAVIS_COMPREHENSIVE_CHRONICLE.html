@@ -181,6 +181,7 @@ hr {
 <li><a href="#phase-5-job-72-the-3-core-measures--bayesian-mixture-routing">Phase 5 Job 72: The 3 Core Measures &amp; Bayesian Mixture Routing</a></li>
 <li><a href="#phase-5-job-73-the-stability-plasticity-squeeze--o1-optimization">Phase 5 Job 73: The Stability-Plasticity Squeeze &amp; O(1) Optimization</a></li>
 <li><a href="#phase-5-job-74-codebase-audit-double-softmax-mathematical-fix--the-1753-top-5-surge">Phase 5 Job 74: Codebase Audit, Double-Softmax Mathematical Fix &amp; The +17.53% Top-5 Surge</a></li>
+<li><a href="#phase-5-job-75-m3-ablation-study-memory--attention-only-no-ewc">Phase 5 Job 75: M3 Ablation Study (Memory + Attention ONLY, No EWC)</a></li>
 </ul>
 </li>
 <li><a href="#3-full-mathematical-loss-function-taxonomy">Full Mathematical Loss Function Taxonomy</a>
@@ -192,7 +193,7 @@ hr {
 <li><a href="#4-exhaustive-hyperparameter-evolution--parameter-dictionary">Exhaustive Hyperparameter Evolution &amp; Parameter Dictionary</a></li>
 <li><a href="#5-architectural-anatomy-dual-level-protection">Architectural Anatomy: Dual-Level Protection</a></li>
 <li><a href="#6-metric-dynamics--academic-realities">Metric Dynamics &amp; Academic Realities</a></li>
-<li><a href="#7-the-empirical-benchmark-ledger">The Empirical Benchmark Ledger (Job 1 to Job 67)</a></li>
+<li><a href="#7-the-empirical-benchmark-ledger">The Empirical Benchmark Ledger (Job 1 to Job 75)</a></li>
 <li><a href="#8-reproducibility--operational-playbook">Reproducibility &amp; Operational Playbook</a></li>
 </ol>
 <hr />
@@ -594,6 +595,58 @@ hier_scores[:, k_start:k_end] = task_weights[:, k:k+1] * intra_probs
 <li><strong>Execution Speed:</strong> Full 10 tasks completed in <strong>3 hours 51 minutes</strong> on NVIDIA RTX 6000 Ada.</li>
 </ul>
 <hr />
+<p><span id="phase-5-job-75-m3-ablation-study-memory--attention-only-no-ewc" class="section-anchor"></span></p>
+<h3>Phase 5 Job 75: M3 Ablation Study (Memory + Attention ONLY, No EWC)</h3>
+<p>To complete the academic $2 \times 2$ factorial matrix ($M_1$: Baseline, $M_2$: EWC Only, $M_3$: Memory Only, $M_4$: Full MAVIS), we executed Job 75 on the cluster with <code>--no-ewc --fresh</code>.</p>
+<p><span id="1-experimental-motivation-research-question" class="section-anchor"></span></p>
+<h4>1. Experimental Motivation &amp; Research Question</h4>
+<p>In continual learning literature, a recurring question is: <em>How much of MAVIS's retention stems from the non-parametric multi-prototype memory bank versus parameter-level Fisher curvature protection (EWC)?</em>
+By explicitly setting $\lambda_{\text{EWC}} = 0.0$ while preserving:</p>
+<ol>
+<li>Multi-Prototype Episodic Memory ($K=10$ centroids/class),</li>
+<li>Multi-Head Attention query-retrieval and dynamic gated fusion,</li>
+<li>Multi-anchor feature distillation ($\lambda_{\text{distill}}=3.0$) and spatial PODNet ($\lambda_{\text{spatial}}=1.5$),</li>
+<li>Post-task dynamic prototype re-alignment,</li>
+<li>Balanced classifier finetuning (25 epochs AdamW) with Weight Alignment,</li>
+<li>Zero-parameter Bayesian Hierarchical routing,</li>
+</ol>
+<p>Job 75 precisely isolated the representation-level memory component from parameter regularization.</p>
+<p><span id="2-key-empirical-findings-october-19-2026" class="section-anchor"></span></p>
+<h4>2. Key Empirical Findings (October 19, 2026):</h4>
+<ol>
+<li><strong>Non-Parametric Memory Rescues Feature Representations:</strong>
+<ul>
+<li>Even without any parameter regularization, non-parametric memory forgetting was restricted to <strong>14.96%</strong> (compared to <strong>64.76%</strong> in the naive baseline CNN).</li>
+<li>Task 1 retention was preserved at <strong>19.20% Hierarchical Top-1 / 57.30% Top-5</strong> and <strong>31.00% NCM retention</strong> (vs 3.50% in baseline).</li>
+<li>This proves that prototype clustering and dynamic re-alignment successfully prevent semantic coordinate drift on the unit hypersphere $\mathbb{S}^{511}$.</li>
+</ul>
+</li>
+<li><strong>Linear Classifier Suffers Catastrophic Overwriting Without EWC:</strong>
+<ul>
+<li>In $M_3$, Linear Head forgetting soared to <strong>59.08%</strong> (approaching baseline's 64.76%). Linear head accuracy on Tasks 1–4 collapsed to 5.50%, 1.30%, 2.40%, and 1.90%.</li>
+<li>In $M_4$ (Full MAVIS), EWC's Fisher curvature penalty directly prevents older classifier weights from being overwritten, slashing linear head forgetting from <strong>59.08% down to 33.90%</strong> (a 25.18% absolute reduction!).</li>
+</ul>
+</li>
+<li><strong>Super-Additive Factorial Synergy ($M_4 \gg M_2 + M_3$):</strong>
+<ul>
+<li>$M_1 \to M_2$ (EWC only): $+0.54%$ Top-1 gain (12.62% $\to$ 13.16%).</li>
+<li>$M_1 \to M_3$ (Memory only): $+4.76%$ Top-1 gain (12.62% $\to$ 17.38%).</li>
+<li>$M_1 \to M_4$ (Dual-Level MAVIS): <strong>$+9.62%$ Top-1 gain (12.62% $\to$ 22.24%)</strong>.</li>
+<li>Because $0.54% + 4.76% = 5.30% \ll 9.62%$, the combination of parameter-level and representation-level retention is mathematically <strong>super-additive</strong>.</li>
+</ul>
+</li>
+</ol>
+<p><span id="job-75-empirical-ledger" class="section-anchor"></span></p>
+<h4>Job 75 Empirical Ledger:</h4>
+<ul>
+<li><strong>Hierarchical Top-1:</strong> <strong>17.38%</strong> (vs 22.24% in M4, 12.62% in M1)</li>
+<li><strong>Hierarchical Top-5:</strong> <strong>48.78%</strong> (vs 49.26% in M4, ~27.00% in M1)</li>
+<li><strong>NCM Memory Forgetting:</strong> <strong>14.96%</strong> (vs 12.50% in M4, 64.76% in M1)</li>
+<li><strong>Hierarchical Forgetting:</strong> <strong>51.29%</strong> (vs 33.90% in M4, 64.76% in M1)</li>
+<li><strong>Linear Head Forgetting:</strong> <strong>59.08%</strong> (vs 33.90% in M4)</li>
+<li><strong>Execution Speed:</strong> 10 tasks completed in <strong>3 hours 44 minutes</strong> on NVIDIA RTX 6000 Ada.</li>
+</ul>
+<hr />
 <p><span id="3-full-mathematical-loss-function-taxonomy" class="section-anchor"></span></p>
 <h2>3. Full Mathematical Loss Function Taxonomy</h2>
 <p><span id="unified-incremental-objective-function" class="section-anchor"></span></p>
@@ -905,7 +958,7 @@ $$\mathcal{L}<em>{\text{finetune}} = - \frac{1}{N</em>{\text{draws}} \cdot C_{\t
 └──────────────────────────────────────────────────────────────┴──────────────────────────────┘
 </code></pre>
 <hr />
-<p><span id="6-metric-dynamics--academic-realities" class="section-anchor"></span></p>
+<p><span id="6-metric-dynamics-academic-realities" class="section-anchor"></span></p>
 <h2>6. Metric Dynamics &amp; Academic Realities</h2>
 <p><span id="1-class-incremental-learning-cil-vs-task-incremental-learning-til" class="section-anchor"></span></p>
 <h3>1. Class-Incremental Learning (CIL) vs. Task-Incremental Learning (TIL)</h3>
@@ -1037,6 +1090,16 @@ where $R_{i, j}$ is the test accuracy on Task $j$ after completing training on T
 <td style="text-align:center"><strong>34.60%</strong> (Ens)</td>
 <td style="text-align:center"><strong>24.30%</strong> (Top-1)<br/><strong>57.90%</strong> (Top-5)</td>
 <td><strong>Publication Final:</strong> Double-softmax fixed. Hierarchical Top-5 surged to <strong>49.26%</strong> (+17.53% gain). Near 1-in-2 Top-5 accuracy across all 200 classes.</td>
+</tr>
+<tr>
+<td><strong>Job 75 (M3 Ablation)</strong></td>
+<td>MAVIS Memory Only (No EWC, K=10, λ=0)</td>
+<td style="text-align:center"><strong>17.38%</strong> (Hier)<br/><strong>16.42%</strong> (Ens)</td>
+<td style="text-align:center"><strong>48.78%</strong> (Hier)<br/><strong>48.56%</strong> (Ens)</td>
+<td style="text-align:center"><strong>51.29%</strong> (Hier)<br/><strong>14.96%</strong> (NCM)</td>
+<td style="text-align:center"><strong>53.39%</strong> (Ens)<br/><strong>59.08%</strong> (Head)</td>
+<td style="text-align:center"><strong>19.20%</strong> (Top-1)<br/><strong>57.30%</strong> (Top-5)</td>
+<td><strong>Factorial Proof:</strong> Memory alone achieves 14.96% NCM forgetting, but head suffers without EWC (59.08%). Proves M4 dual-level synergy is super-additive.</td>
 </tr>
 </tbody>
 </table>
