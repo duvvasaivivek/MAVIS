@@ -1,6 +1,13 @@
 import sys
 import io
 import os
+import copy
+import json
+import shutil
+import datetime
+import argparse
+import torch
+
 os.environ["TRITON_DISABLE"] = "1"  # CRITICAL: Completely disable Triton to prevent C++ compiler crashes on HPC
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
@@ -11,22 +18,21 @@ MAVIS -- Memory Augmented Visual Incremental System (PyTorch)
 Main entry point for the project.
 
 Usage:
-    python main.py setup          # Verify environment + download dataset
-    python main.py verify         # Run verification checks
-    python main.py visualize      # Visualize task samples
-    python main.py train_baseline # Train PyTorch baseline (Phase 2)
+    python main.py setup                      # Verify environment + download dataset
+    python main.py verify                     # Run verification checks
+    python main.py config                     # Inspect active configuration
+    python main.py visualize                  # Visualize task samples
+    python main.py train_baseline             # Train PyTorch baseline (Phase 2)
+    python main.py train_ewc                  # Train CNN + EWC (Phase 3)
+    python main.py train_mavis                # Train Full MAVIS (Phase 5, M4)
+    python main.py train_mavis --no-ewc       # Train MAVIS ablation (M3: Memory only)
+    python main.py train_mavis --fresh        # Train fresh run without resuming
 """
-
-import os
-import json
-import argparse
-import torch
-import torch.multiprocessing as mp
 
 # In-process data loading with RAM caching eliminates all Python 3.14 multiprocessing / sem_unlink bugs
 
 # Project imports
-from config import get_default_config, MAVISConfig, PROJECT_ROOT, CONFIGS_DIR, RESULTS_DIR
+from config import get_default_config, MAVISConfig, RESULTS_DIR
 from data.task_generator import TaskGenerator
 
 
@@ -258,7 +264,6 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     )
 
     # Auto-resume from latest completed task if checkpoint exists
-    import copy
     start_task = 0
     if not resume:
         print(f"[MAVIS] Starting fresh training run (--fresh specified). Cleaning previous checkpoints in {checkpoint_dir}...\n", flush=True)
@@ -344,7 +349,6 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
                     if start_task >= config.dataset.num_tasks:
                         print(f"\n[MAVIS] All {config.dataset.num_tasks} tasks already completed in {checkpoint_dir}.")
                         print(f"[MAVIS] Archiving previous completed run and auto-starting fresh training run from Task 1.\n", flush=True)
-                        import shutil, datetime
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         archive_dir = f"{checkpoint_dir}_completed_{timestamp}"
                         try:

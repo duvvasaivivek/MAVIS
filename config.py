@@ -7,15 +7,15 @@ Initial values from spec §47 — these are starting values, NOT final optimized
 
 import os
 import yaml
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+CHECKPOINT_DIR = os.path.join(RESULTS_DIR, "checkpoints")
 CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
 
 
@@ -87,9 +87,7 @@ class EncoderConfig:
 @dataclass
 class ClassifierConfig:
     """Classifier head."""
-    hidden_dim: int = 256
     num_classes: int = 200
-    dropout_rate: float = 0.3
     margin: float = 0.20  # Additive cosine margin to enforce inter-class angular separation
 
 
@@ -115,21 +113,14 @@ class EWCConfig:
 @dataclass
 class MemoryConfig:
     """
-    External Neural Memory — stores compact feature representations.
+    External Neural Memory — stores compact multi-prototype representations.
     
-    Each entry: (512-D feature, class label, importance score, task_id)
-    Memory is fixed-size; adaptive selection replaces least useful entries.
+    Each class stores K=10 prototype vectors and covariance diagonals.
+    Total capacity = 200 classes × 10 prototypes = 2000 entries.
     """
     capacity: int = 2000
     feature_dim: int = 512
     prototypes_per_class: int = 10  # Expanded K=10 sub-clusters per class for 43% higher visual coverage
-    strategy: str = "adaptive"  # "adaptive", "random", "fifo"
-    # Importance scoring weights
-    novelty_weight: float = 1.0
-    diversity_weight: float = 0.5
-    class_balance_weight: float = 0.5
-    # Budget sweep for experiments
-    capacity_sweep: list = field(default_factory=lambda: [50, 100, 250, 500, 1000, 1400, 2000])
 
 
 @dataclass
@@ -193,7 +184,9 @@ class MAVISConfig:
         for section_name, section_data in data.items():
             if hasattr(config, section_name) and isinstance(section_data, dict):
                 section_cls = type(getattr(config, section_name))
-                setattr(config, section_name, section_cls(**section_data))
+                valid_fields = {f.name for f in fields(section_cls)}
+                filtered_data = {k: v for k, v in section_data.items() if k in valid_fields}
+                setattr(config, section_name, section_cls(**filtered_data))
 
         # Fall back to project data directory if serialized path does not exist on current OS
         if not os.path.exists(config.dataset.data_dir):
@@ -218,7 +211,7 @@ class MAVISConfig:
             f"  Learning rate: {self.training.learning_rate}",
             f"  Feature dim:   {self.encoder.feature_dim}",
             f"  EWC:           {'ON (lambda=' + str(self.ewc.ewc_lambda) + ')' if self.ewc.enabled else 'OFF'}",
-            f"  Memory:        {self.memory.capacity} entries ({self.memory.strategy})",
+            f"  Memory:        {self.memory.capacity} entries ({self.memory.prototypes_per_class} protos/class)",
             f"  Attention:     {self.attention.num_heads} heads (key_dim={self.attention.key_dim})",
             f"  Fusion dim:    {self.fusion.fusion_dim}",
             f"  Mixed prec:    {self.training.mixed_precision}",

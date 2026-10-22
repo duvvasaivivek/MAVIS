@@ -62,6 +62,12 @@ coverage.xml
 *.bin
 models/saved/
 checkpoints/
+results/checkpoints/
+
+# --- Documentation & Test Suites ---
+!docs/
+!tests/
+
 
 # --- Data (large datasets) ---
 data/raw/

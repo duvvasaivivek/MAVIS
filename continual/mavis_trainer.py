@@ -6,6 +6,7 @@ The Continual Learning training loop specifically designed for Phase 4 & 5.
 
 import os
 import copy
+import json
 import time
 import torch
 import torch.nn as nn
@@ -25,7 +26,7 @@ class MAVISTrainer:
                  checkpoint_dir, device=None, distill_lambda: float = 3.0, proto_lambda: float = 0.5, repel_lambda: float = 2.0,
                  lr_backbone_factor: float = 0.20, spatial_distill_lambda: float = 1.5, label_smoothing: float = 0.02,
                  proto_replay_lambda: float = 2.0, ewc_lambda: float = 5000.0, fisher_samples: int = 2000,
-                 gamma: float = 0.95, proto_finetune_epochs: int = 25, proto_finetune_draws: int = 10):
+                 gamma: float = 0.88, proto_finetune_epochs: int = 25, proto_finetune_draws: int = 5):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -333,8 +334,7 @@ class MAVISTrainer:
         num_old_classes = task_id * self.model.memory_bank.classes_per_task
         num_new_classes = self.model.memory_bank.classes_per_task
         if num_old_classes > 0:
-            all_mean_protos = self.model.memory_bank.get_mean_class_prototypes(up_to_task_id=task_id)
-            self.model.classifier.align_weights(num_old_classes, num_new_classes, prototypes=all_mean_protos)
+            self.model.classifier.align_weights(num_old_classes, num_new_classes)
 
         # 2c. Balanced Classifier Finetuning (frozen encoder, prototype replay)
         # Re-calibrates the classifier head for ALL seen classes, preventing
@@ -411,8 +411,6 @@ class MAVISTrainer:
             p.requires_grad = False
         for p in self.model.classifier.parameters():
             p.requires_grad = True
-        for p in self.model.task_router.parameters():
-            p.requires_grad = False
 
         ft_params = list(self.model.classifier.parameters())
         ft_optimizer = optim.AdamW(ft_params, lr=ft_lr, weight_decay=1e-4)
@@ -486,8 +484,6 @@ class MAVISTrainer:
             p.requires_grad = True
         for p in self.model.classifier.parameters():
             p.requires_grad = True
-        for p in self.model.task_router.parameters():
-            p.requires_grad = False
 
         print(f"  [MAVIS] Balanced classifier finetuning complete: final_acc={final_acc*100:.2f}%", flush=True)
 
@@ -667,7 +663,6 @@ class MAVISTrainer:
         metrics_top5_ens_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_ens.json")
         metrics_top5_head_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_head.json")
         metrics_top5_hier_ckpt = os.path.join(self.checkpoint_dir, "accuracy_matrix_top5_hier.json")
-        import json
         with open(metrics_ckpt, "w") as f:
             json.dump(self.accuracy_matrix, f, indent=2)
         with open(metrics_hier_ckpt, "w") as f:

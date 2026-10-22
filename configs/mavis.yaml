@@ -47,9 +47,7 @@ encoder:
   use_batch_norm: true
   dropout_rate: 0.5
 classifier:
-  hidden_dim: 256
   num_classes: 200
-  dropout_rate: 0.3
   margin: 0.2
 ewc:
   enabled: true
@@ -65,18 +63,6 @@ memory:
   capacity: 2000
   feature_dim: 512
   prototypes_per_class: 10
-  strategy: adaptive
-  novelty_weight: 1.0
-  diversity_weight: 0.5
-  class_balance_weight: 0.5
-  capacity_sweep:
-  - 50
-  - 100
-  - 250
-  - 500
-  - 1000
-  - 1400
-  - 2000
 attention:
   num_heads: 4
   key_dim: 256

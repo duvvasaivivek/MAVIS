@@ -56,7 +56,7 @@ class IncrementalClassifier(nn.Module):
         return self.fc(x, targets=targets)
 
     @torch.no_grad()
-    def align_weights(self, num_old_classes: int, num_new_classes: int, prototypes: torch.Tensor = None):
+    def align_weights(self, num_old_classes: int, num_new_classes: int):
         """
         Measure 1: Equalize classifier head temperature scales.
         Ensures all seen classes operate on an identical logit scale (1.0),

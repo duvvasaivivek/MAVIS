@@ -3,6 +3,10 @@ torch>=2.1.0
 torchvision>=0.16.0
 torchaudio>=2.1.0
 
+# Visualization & Reporting
+matplotlib>=3.7.0
+markdown-it-py>=3.0.0
+
 # Utilities
 pyyaml>=6.0
 pillow>=10.0.0

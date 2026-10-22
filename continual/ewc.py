@@ -33,7 +33,7 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
         Dictionary mapping parameter name -> Fisher diagonal tensor
     """
     model.eval()
-    fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad and "task_router" not in n}
+    fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
 
     samples_seen = 0
     batches_seen = 0
@@ -62,7 +62,7 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
         loss.backward()
 
         for n, p in model.named_parameters():
-            if p.requires_grad and p.grad is not None and "task_router" not in n:
+            if p.requires_grad and p.grad is not None:
                 fisher[n] += p.grad.detach() ** 2
 
         samples_seen += batch_size
@@ -77,8 +77,8 @@ def compute_fisher(model, dataloader, device, num_samples=1000, task_id=0, class
 
 
 def snapshot_params(model):
-    """Save a copy of all current model parameters (excluding unused auxiliary router)."""
-    return {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad and "task_router" not in n}
+    """Save a copy of all current model parameters."""
+    return {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
 
 
 class OnlineEWC:
