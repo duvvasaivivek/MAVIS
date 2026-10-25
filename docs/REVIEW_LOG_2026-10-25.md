@@ -371,7 +371,7 @@ machine was critically low on memory while the session was idle.
 | `tests/test_decode_cache.py` | Four checks that the image cache is faithful: identical pixels, labels and ordering; identical tensors under both transforms; and the expected file type and shape. All four pass. |
 | `experiments/run_factorial.py` | Runs all five cells through one identical code path with matched settings, one process per cell and seed, skipping any cell already finished. |
 | `experiments/analyze_factorial.py` | Reads the tagged result files and reports accuracy, spread, intervals, effect sizes, paired contrasts, the interaction term, and how many seeds a given effect would need. |
-| `scripts/run_factorial.sh` | SLURM job array, one task per cell and seed, following the cluster paths and the Triton compiler workaround already used by the Phase 5 scripts. Defaults to published scale; `SCALE=quick` runs the reduced sweep. Skips any cell whose result file exists, and resumes rather than restarting, so it survives a wall-clock limit. |
+| `scripts/run_factorial.sh` | Single SLURM job that trains all five cells sequentially for each seed, in the same shape as the Phase 5 scripts and with the same cluster paths and Triton compiler workaround. Defaults to published scale; `SCALE=quick` runs the reduced sweep, and `SEEDS=` / `CELLS=` narrow the work. Skips any cell whose result file exists, so resubmitting after a wall-clock kill continues where it stopped; one failing cell does not abort the rest; and it runs the analyser itself at the end. |
 
 ### Naming
 

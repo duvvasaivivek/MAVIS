@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# MAVIS factorial study — SLURM job array
+# MAVIS factorial study — single SLURM job, all cells trained sequentially
 # =============================================================================
-# Runs all five cells of the 2x2 factorial (plus the attention ablation) across
-# several seeds, one array task per (cell, seed), after the 2026-10-25 fixes.
+# One job, one GPU, same shape as scripts/run_phase5.sh. It walks the five
+# cells of the factorial for each seed in turn:
 #
 #   M1     baseline CNN                        -> baseline{tag}_results.json
 #   M2     CNN + EWC                           -> ewc{tag}_results.json
@@ -12,57 +12,51 @@
 #   M4noA  full MAVIS, retrieval path bypassed -> mavis_noattn{tag}_results.json
 #
 # SUBMIT
-#   # 1. preflight on a login node or a short interactive allocation (2 min, no GPU needed):
+#   # preflight on a login node first (2 minutes, no GPU needed):
 #   python tests/test_review_sanity.py && python tests/test_decode_cache.py
 #
-#   # 2. cheap sweep first — 5 cells x 3 seeds at reduced scale, ~25 min per cell.
-#   #    This is what produces the seed-to-seed spread. Do this before spending
-#   #    the full-scale GPU hours.
-#   SCALE=quick sbatch scripts/run_factorial.sh
+#   sbatch scripts/run_factorial.sh                      # published scale, all 5 cells x 3 seeds
+#   SCALE=quick sbatch scripts/run_factorial.sh          # width 32 / 5 tasks / 10 epochs
+#   SEEDS="1" sbatch scripts/run_factorial.sh            # one seed only
+#   CELLS="M3 M4 M4noA" sbatch scripts/run_factorial.sh  # just the MAVIS cells
+#   EWC_LAMBDA=50000 TAG_EXTRA=_lam50k CELLS="M2" sbatch scripts/run_factorial.sh
 #
-#   # 3. full published scale — width 128, 10 tasks, 50 epochs, ~4 h per MAVIS cell.
-#   sbatch scripts/run_factorial.sh
+# IF THE WALL CLOCK CUTS IT SHORT
+#   Just resubmit. Any cell whose result file already exists is skipped, so a
+#   second submission picks up where the first stopped. Nothing is recomputed
+#   and nothing is overwritten. If you would rather not rely on that, split the
+#   work across submissions with SEEDS= or CELLS= as shown above.
 #
-#   # single cell / single seed, e.g. just M4 seed 1:
-#   sbatch --array=3 scripts/run_factorial.sh
-#
-#   # the EWC strength variant (published M2 used 50000; the default here matches M4):
-#   EWC_LAMBDA=50000 TAG_EXTRA=_lam50k sbatch --array=1,6,11 scripts/run_factorial.sh
-#
-# ANALYSE (after the array finishes)
+# ANALYSE
 #   python experiments/analyze_factorial.py --width 128 --tasks 10 --epochs 50
-#   python experiments/analyze_factorial.py --width 32 --tasks 5 --epochs 10   # quick sweep
+#   python experiments/analyze_factorial.py --width 32 --tasks 5 --epochs 10   # quick
+#   (the job runs this itself at the end, so it is already in the .out file)
 #
 # NOTES
-#   * Each array task is an independent process with its own tagged checkpoint
-#     directory, so they are safe to run concurrently on separate GPUs.
-#   * The decoded-image disk cache is shared. It is written to a pid-suffixed
-#     temporary file and then renamed atomically, so concurrent array tasks
-#     cannot corrupt it; the first one to reach a task pays the decode cost and
-#     the rest load it in about 0.1 s.
-#   * --fresh is deliberately NOT passed, so a requeued or extended job resumes
-#     from its highest completed task. A cell whose result file already exists is
-#     skipped entirely. If you want a genuine restart, delete that cell's result
-#     file and its checkpoint directory first.
+#   * One cell failing does not abort the rest. Failures are collected and
+#     listed in a summary at the end, and the job exits non-zero if any failed.
+#   * --fresh is deliberately NOT passed, so a cell interrupted mid-way resumes
+#     from its highest completed task on the next submission. To force a real
+#     restart, delete that cell's result file and its checkpoint directory.
 #   * Checkpoints written before the 2026-10-25 fixes must not be resumed onto.
-#     Use a tag you have not used before, or clear the directory.
+#     Use a tag you have not used before, or clear the directory first.
+#   * The first cell pays the image decode cost, about 235 s per task split.
+#     Every later cell reads the cache in about 0.1 s, so cell one looks
+#     disproportionately slow and the rest will not.
 # =============================================================================
 
 #SBATCH --job-name=mavis-factorial
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=16:00:00
-#SBATCH --array=0-14%4
-#SBATCH --output=/home/lakshum/Duvva_Sai_Vivek/logs/mavis-factorial-%A_%a.out
-#SBATCH --error=/home/lakshum/Duvva_Sai_Vivek/logs/mavis-factorial-%A_%a.err
-
-set -euo pipefail
+#SBATCH --output=/home/lakshum/Duvva_Sai_Vivek/logs/mavis-factorial-%j.out
+#SBATCH --error=/home/lakshum/Duvva_Sai_Vivek/logs/mavis-factorial-%j.err
 
 PROJECT=/home/lakshum/Duvva_Sai_Vivek/MAVIS
 VENV=/home/lakshum/Duvva_Sai_Vivek/environments/MAVISvenv
 
-cd "$PROJECT"
+cd "$PROJECT" || exit 1
+
 source "$VENV/bin/activate"
 
 COMPILER=/home/lakshum/Duvva_Sai_Vivek/environments/compiler
@@ -82,41 +76,15 @@ else
     WIDTH=128; TASKS=10; EPOCHS=50; BATCH=128
 fi
 
-SEEDS=(1 2 3)
-CELLS=(M1 M2 M3 M4 M4noA)
-
+SEEDS="${SEEDS:-1 2 3}"
+CELLS="${CELLS:-M1 M2 M3 M4 M4noA}"
 EWC_LAMBDA="${EWC_LAMBDA:-5000}"
 TAG_EXTRA="${TAG_EXTRA:-}"
-
-# ----------------------------------------------------------------------------
-# Map the array index onto one (cell, seed) pair.
-# ----------------------------------------------------------------------------
-IDX="${SLURM_ARRAY_TASK_ID:-0}"
-NUM_CELLS=${#CELLS[@]}
-CELL="${CELLS[$(( IDX % NUM_CELLS ))]}"
-SEED="${SEEDS[$(( IDX / NUM_CELLS ))]}"
-
-TAG="_fac${TAG_EXTRA}_w${WIDTH}_t${TASKS}_e${EPOCHS}_s${SEED}"
-
-case "$CELL" in
-    M1)    COMMAND="train_baseline"; EXTRA=(); PREFIX="baseline" ;;
-    M2)    COMMAND="train_ewc";      EXTRA=(--ewc-lambda "$EWC_LAMBDA"); PREFIX="ewc" ;;
-    M3)    COMMAND="train_mavis";    EXTRA=(--no-ewc); PREFIX="mavis_m3" ;;
-    M4)    COMMAND="train_mavis";    EXTRA=(); PREFIX="mavis" ;;
-    M4noA) COMMAND="train_mavis";    EXTRA=(--no-attention); PREFIX="mavis_noattn" ;;
-    *)     echo "Unknown cell '$CELL' from array index $IDX"; exit 1 ;;
-esac
-
-RESULT="results/raw/${PREFIX}${TAG}_results.json"
 
 echo "=========================================="
 echo "MAVIS factorial study"
 echo "=========================================="
-echo "Job:        ${SLURM_ARRAY_JOB_ID:-local}_${IDX}"
-echo "Cell:       $CELL   (seed $SEED)"
-echo "Scale:      width $WIDTH | $TASKS tasks | $EPOCHS epochs/task | batch $BATCH"
-echo "Tag:        $TAG"
-echo "Result:     $RESULT"
+echo "Job ID:     ${SLURM_JOB_ID:-local}"
 echo "Node:       $(hostname)"
 echo "Date:       $(date)"
 echo "Python:     $(python --version 2>&1)"
@@ -125,35 +93,90 @@ echo "GPU:        $(python -c 'import torch; print(torch.cuda.get_device_name(0)
 echo "CUDA:       $(python -c 'import torch; print(torch.cuda.is_available())')"
 echo "Devices:    ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "CPUs:       ${SLURM_CPUS_PER_TASK:-unset}"
-if [ "$CELL" = "M2" ]; then
-    echo "EWC lambda: $EWC_LAMBDA   (the published M2 used 50000; 5000 matches M4)"
-fi
+echo "------------------------------------------"
+echo "Scale:      width $WIDTH | $TASKS tasks | $EPOCHS epochs/task | batch $BATCH"
+echo "Cells:      $CELLS"
+echo "Seeds:      $SEEDS"
+echo "EWC lambda: $EWC_LAMBDA   (the published M2 used 50000; 5000 matches M4)"
 echo "=========================================="
 
 nvidia-smi || echo "WARNING: nvidia-smi failed; continuing to the CUDA checks above."
 
-if [ -f "$RESULT" ]; then
-    echo "[skip] $RESULT already exists. Delete it and the matching checkpoint"
-    echo "       directory if you want this cell re-run."
-    exit 0
+FAILED=""
+DONE_COUNT=0
+SKIP_COUNT=0
+RUN_START=$(date +%s)
+
+for SEED in $SEEDS; do
+    for CELL in $CELLS; do
+
+        case "$CELL" in
+            M1)    COMMAND="train_baseline"; PREFIX="baseline";     EXTRA="" ;;
+            M2)    COMMAND="train_ewc";      PREFIX="ewc";          EXTRA="--ewc-lambda $EWC_LAMBDA" ;;
+            M3)    COMMAND="train_mavis";    PREFIX="mavis_m3";     EXTRA="--no-ewc" ;;
+            M4)    COMMAND="train_mavis";    PREFIX="mavis";        EXTRA="" ;;
+            M4noA) COMMAND="train_mavis";    PREFIX="mavis_noattn"; EXTRA="--no-attention" ;;
+            *)     echo "[error] unknown cell '$CELL' — skipping"; FAILED="$FAILED ${CELL}/s${SEED}"; continue ;;
+        esac
+
+        TAG="_fac${TAG_EXTRA}_w${WIDTH}_t${TASKS}_e${EPOCHS}_s${SEED}"
+        RESULT="results/raw/${PREFIX}${TAG}_results.json"
+
+        echo ""
+        echo "=========================================="
+        echo ">>> $CELL   seed $SEED   ($(date +%H:%M:%S))"
+        echo "    tag    $TAG"
+        echo "    result $RESULT"
+        echo "=========================================="
+
+        if [ -f "$RESULT" ]; then
+            echo "[skip] already exists — delete it and its checkpoint directory to re-run"
+            SKIP_COUNT=$(( SKIP_COUNT + 1 ))
+            continue
+        fi
+
+        CELL_START=$(date +%s)
+        # shellcheck disable=SC2086
+        python main.py "$COMMAND" \
+            --seed "$SEED" \
+            --tasks "$TASKS" \
+            --epochs "$EPOCHS" \
+            --width "$WIDTH" \
+            --batch-size "$BATCH" \
+            --tag "$TAG" \
+            $EXTRA
+        STATUS=$?
+        CELL_MINS=$(( ( $(date +%s) - CELL_START ) / 60 ))
+
+        if [ "$STATUS" -eq 0 ]; then
+            echo "[done] $CELL seed $SEED in ${CELL_MINS} min -> $RESULT"
+            DONE_COUNT=$(( DONE_COUNT + 1 ))
+        else
+            echo "[FAIL] $CELL seed $SEED exited $STATUS after ${CELL_MINS} min; continuing with the rest"
+            FAILED="$FAILED ${CELL}/s${SEED}"
+        fi
+    done
+done
+
+TOTAL_MINS=$(( ( $(date +%s) - RUN_START ) / 60 ))
+
+echo ""
+echo "=========================================="
+echo "Factorial study finished: $(date)"
+echo "Total wall time: ${TOTAL_MINS} min"
+echo "Trained: $DONE_COUNT   Skipped (already present): $SKIP_COUNT"
+if [ -n "$FAILED" ]; then
+    echo "FAILED cells:$FAILED"
+else
+    echo "No failures."
 fi
-
-echo "Starting $CELL, seed $SEED ..."
+echo "=========================================="
+echo ""
+echo "Analysis:"
+python experiments/analyze_factorial.py --width "$WIDTH" --tasks "$TASKS" --epochs "$EPOCHS" \
+    || echo "(analysis step failed; run it by hand)"
 echo "=========================================="
 
-python main.py "$COMMAND" \
-    --seed "$SEED" \
-    --tasks "$TASKS" \
-    --epochs "$EPOCHS" \
-    --width "$WIDTH" \
-    --batch-size "$BATCH" \
-    --tag "$TAG" \
-    ${EXTRA[@]+"${EXTRA[@]}"}
-    # the ${...+...} form is needed because `set -u` on bash 4.2 (CentOS 7 and
-    # similar) treats an empty array expansion as an unbound variable
-
-echo "=========================================="
-echo "$CELL seed $SEED completed"
-echo "Wrote: $RESULT"
-echo "Finished: $(date)"
-echo "=========================================="
+if [ -n "$FAILED" ]; then
+    exit 1
+fi

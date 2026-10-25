@@ -46,7 +46,7 @@ Other tools:
 - `python experiments/benchmark.py` prints the M1..M4 markdown comparison table from `results/raw/*.json`.
 - `python config.py` regenerates `configs/*.yaml` from the dataclass defaults. `python data/task_generator.py` regenerates `configs/task_definitions.json`.
 - `scripts/run_phase5.sh` and `scripts/run_phase5_m3_ablation.sh` are SLURM job scripts with hardcoded cluster paths. They are the HPC entrypoints and will not run locally.
-- `scripts/run_factorial.sh` is a SLURM job array covering all five cells (M1, M2, M3, M4, M4-no-attention) across three seeds, one array task per pair. Same cluster paths as the Phase 5 scripts. `sbatch scripts/run_factorial.sh` runs published scale; `SCALE=quick sbatch ...` runs width 32 / 5 tasks / 10 epochs. It skips cells whose result file already exists and resumes rather than restarting. Analyse with `python experiments/analyze_factorial.py --width W --tasks T --epochs E`.
+- `scripts/run_factorial.sh` is a single SLURM job, same shape as the Phase 5 scripts, that trains all five cells (M1, M2, M3, M4, M4-no-attention) sequentially for each seed. `sbatch scripts/run_factorial.sh` runs published scale; `SCALE=quick sbatch ...` runs width 32 / 5 tasks / 10 epochs; `SEEDS="1"` and `CELLS="M3 M4"` narrow the work. It skips cells whose result file already exists, so resubmitting after a wall-clock kill continues where it stopped, and one failing cell does not abort the rest. It runs `experiments/analyze_factorial.py` itself at the end, so the summary lands in the job's `.out` file.
 - `scripts/generate_chronicle_pdf.py` expects `MAVIS_COMPREHENSIVE_CHRONICLE.md` at the project root, which no longer exists. Treat it as stale.
 
 ## Architecture
