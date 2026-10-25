@@ -36,6 +36,23 @@ from config import get_default_config, MAVISConfig, RESULTS_DIR
 from data.task_generator import TaskGenerator
 
 
+def seed_everything(seed: int):
+    """Seed Python, NumPy and torch (CPU + CUDA). Added 2026-10-25: no training run was seeded before."""
+    import random
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    print(f"[Seed] torch/numpy/random seeded with {seed} (cuDNN benchmark stays on, so runs are "
+          f"reproducible in distribution, not bitwise)")
+
+
+def run_tag(config: MAVISConfig) -> str:
+    """Suffix appended to checkpoint dirs and result filenames so runs do not overwrite each other."""
+    return getattr(config, "run_tag", "") or ""
+
+
 def setup_environment(config: MAVISConfig):
     """Initialize system, verify PyTorch/CUDA, and download data."""
     from data.download import download_tiny_imagenet
@@ -108,17 +125,20 @@ def train_baseline(config: MAVISConfig):
     # 2. Model
     model = BaselineCNN(
         feature_dim=config.encoder.feature_dim,
-        total_classes=task_gen.num_classes
+        total_classes=task_gen.num_classes,
+        base_width=getattr(config.encoder, "base_width", 128),
+        dropout_rate=config.encoder.dropout_rate
     )
 
     # 3. Continual Trainer
+    tag = run_tag(config)
     trainer = ContinualTrainer(
         model=model,
         loader=loader,
         task_gen=task_gen,
         learning_rate=config.training.learning_rate,
         epochs_per_task=config.training.epochs_per_task,
-        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", "baseline"),
+        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", f"baseline{tag}"),
         device=device
     )
 
@@ -131,10 +151,14 @@ def train_baseline(config: MAVISConfig):
 
     # 5. Save Final Results
     final_res = {
+        "seed": getattr(config, "run_seed", None),
+        "base_width": getattr(config.encoder, "base_width", 128),
+        "epochs_per_task": config.training.epochs_per_task,
+        "num_tasks": config.dataset.num_tasks,
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_forgetting": trainer.compute_forgetting()
     }
-    res_path = os.path.join(RESULTS_DIR, "raw", "baseline_results.json")
+    res_path = os.path.join(RESULTS_DIR, "raw", f"baseline{tag}_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)
     with open(res_path, "w") as f:
         json.dump(final_res, f, indent=2)
@@ -172,19 +196,23 @@ def train_ewc(config: MAVISConfig):
 
     model = BaselineCNN(
         feature_dim=config.encoder.feature_dim,
-        total_classes=task_gen.num_classes
+        total_classes=task_gen.num_classes,
+        base_width=getattr(config.encoder, "base_width", 128),
+        dropout_rate=config.encoder.dropout_rate
     )
 
+    tag = run_tag(config)
     trainer = ContinualTrainer(
         model=model,
         loader=loader,
         task_gen=task_gen,
         learning_rate=config.training.learning_rate,
         epochs_per_task=config.training.epochs_per_task,
-        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", "ewc"),
+        checkpoint_dir=os.path.join(RESULTS_DIR, "checkpoints", f"ewc{tag}"),
         device=device,
         ewc_lambda=config.ewc.ewc_lambda,
-        fisher_samples=config.ewc.fisher_samples
+        fisher_samples=config.ewc.fisher_samples,
+        gamma=getattr(config.ewc, "gamma", 0.95)  # before 2026-10-25 M2 silently used the class default 0.95
     )
 
     for task_id in range(config.dataset.num_tasks):
@@ -194,12 +222,17 @@ def train_ewc(config: MAVISConfig):
         print(f"  -> Average Forgetting so far: {forgetting:.4f}")
 
     final_res = {
+        "seed": getattr(config, "run_seed", None),
+        "base_width": getattr(config.encoder, "base_width", 128),
+        "epochs_per_task": config.training.epochs_per_task,
+        "num_tasks": config.dataset.num_tasks,
         "ewc_lambda": config.ewc.ewc_lambda,
+        "gamma": getattr(config.ewc, "gamma", 0.95),
         "fisher_samples": config.ewc.fisher_samples,
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_forgetting": trainer.compute_forgetting()
     }
-    res_path = os.path.join(RESULTS_DIR, "raw", "ewc_results.json")
+    res_path = os.path.join(RESULTS_DIR, "raw", f"ewc{tag}_results.json")
     os.makedirs(os.path.dirname(res_path), exist_ok=True)
     with open(res_path, "w") as f:
         json.dump(final_res, f, indent=2)
@@ -239,6 +272,9 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
     model = MAVIS(config)
 
     sub_dir = "mavis" if config.ewc.enabled else "mavis_m3"
+    if not getattr(config.attention, "enabled", True):
+        sub_dir += "_noattn"
+    sub_dir += run_tag(config)
     checkpoint_dir = os.path.join(RESULTS_DIR, "checkpoints", sub_dir)
     ewc_lambda = config.ewc.ewc_lambda if config.ewc.enabled else 0.0
     trainer = MAVISTrainer(
@@ -404,10 +440,17 @@ def train_mavis(config: MAVISConfig, resume: bool = True):
         print(f"  -> Average Forgetting so far | Hierarchical: {forgetting_hier:.4f} | Ensemble: {forgetting_ens:.4f} (Top-5: {forgetting_ens_top5:.4f}) | Head: {forgetting_head:.4f} (Top-5: {forgetting_head_top5:.4f}) | NCM: {forgetting_ncm:.4f}", flush=True)
 
     final_res = {
+        "seed": getattr(config, "run_seed", None),
+        "base_width": getattr(config.encoder, "base_width", 128),
+        "epochs_per_task": config.training.epochs_per_task,
+        "num_tasks": config.dataset.num_tasks,
+        "attention_enabled": getattr(config.attention, "enabled", True),
         "ewc_enabled": config.ewc.enabled,
         "ewc_lambda": ewc_lambda,
         "gamma": getattr(config.ewc, "gamma", 0.88),
         "fisher_samples": config.ewc.fisher_samples,
+        "final_accuracy_matrix_routing": trainer.accuracy_matrix_routing,
+        "norm_diagnostics": trainer.norm_diagnostics,
         "final_accuracy_matrix": trainer.accuracy_matrix,
         "final_accuracy_matrix_hier": trainer.accuracy_matrix_hier,
         "final_accuracy_matrix_ens": trainer.accuracy_matrix_ens,
@@ -445,6 +488,13 @@ def main():
     parser.add_argument("--ewc-lambda", type=float, default=None, help="Override EWC lambda regularization strength (e.g. 2000.0)")
     parser.add_argument("--no-ewc", action="store_true", help="Disable EWC regularization in MAVIS (ablation model M3)")
     parser.add_argument("--fresh", action="store_true", help="Start training fresh from Task 1 even if checkpoints exist")
+    # Added 2026-10-25 for the review experiments
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for torch/numpy/random (default: config.training.seed)")
+    parser.add_argument("--tasks", type=int, default=None, help="Train only the first N tasks of the fixed class order")
+    parser.add_argument("--width", type=int, default=None, help="Encoder base width (128 = published; must be a multiple of 32)")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override training batch size")
+    parser.add_argument("--no-attention", action="store_true", help="MAVIS ablation: bypass attention retrieval and gated fusion")
+    parser.add_argument("--tag", type=str, default="", help="Suffix for checkpoint dir and results filename, e.g. _w64_s1")
     args = parser.parse_args()
 
     # Load config
@@ -452,6 +502,28 @@ def main():
         config = MAVISConfig.load(args.config)
     else:
         config = get_default_config()
+
+    seed = args.seed if args.seed is not None else config.training.seed
+    config.run_seed = seed
+    config.run_tag = args.tag
+    if args.command.startswith("train"):
+        seed_everything(seed)
+
+    if args.tasks is not None:
+        config.dataset.num_tasks = args.tasks
+        print(f"[Config] Command-line override: num_tasks = {args.tasks} (first {args.tasks} tasks of the seed-42 class order)")
+
+    if args.width is not None:
+        config.encoder.base_width = args.width
+        print(f"[Config] Command-line override: encoder base_width = {args.width}")
+
+    if args.batch_size is not None:
+        config.training.batch_size = args.batch_size
+        print(f"[Config] Command-line override: batch_size = {args.batch_size}")
+
+    if args.no_attention:
+        config.attention.enabled = False
+        print(f"[Config] Command-line override: attention retrieval + gated fusion DISABLED (ablation)")
 
     if args.epochs is not None:
         config.training.epochs_per_task = args.epochs

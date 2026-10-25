@@ -81,7 +81,14 @@ class EncoderConfig:
     # Channel counts per block — reduce if GPU OOM
     channels: list = field(default_factory=lambda: [64, 128, 256, 512])
     use_batch_norm: bool = True
-    dropout_rate: float = 0.5
+    # Channel dropout inside every residual block. Changed from 0.5 to 0.0 on 2026-10-25: MAVIS
+    # consumed this value while BaselineCNN silently used 0.0, so M3/M4 trained with heavy channel
+    # dropout and M1/M2 with none, confounding every comparison across that boundary. It is now
+    # wired identically into both models, so this one field controls both.
+    dropout_rate: float = 0.0
+    # Stem / stage-1 channel count actually consumed by CNNEncoder (stages 2-4 are 2x, 4x, 8x).
+    # 128 reproduces the published architecture (128/256/512/1024). `channels` above is NOT read.
+    base_width: int = 128
 
 
 @dataclass
@@ -139,6 +146,8 @@ class AttentionConfig:
     query_dim: int = 256
     value_dim: int = 512
     temperature: float = 0.5  # Temperature-sharpened retrieval to eliminate diluted averaging
+    # Ablation switch: False bypasses attention retrieval + gated fusion in MAVIS.forward (see --no-attention)
+    enabled: bool = True
     # Heads sweep for experiments
     heads_sweep: list = field(default_factory=lambda: [1, 2, 4, 8])
 

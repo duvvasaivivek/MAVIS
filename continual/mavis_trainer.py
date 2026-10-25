@@ -64,6 +64,8 @@ class MAVISTrainer:
         self.accuracy_matrix_top5_ens = []   # Fused Ensemble Matrix (Top-5)
         self.accuracy_matrix_top5_head = []  # Aligned Linear Head Matrix (Top-5)
         self.accuracy_matrix_top5_hier = []  # Hierarchical Matrix (Top-5)
+        self.accuracy_matrix_routing = []    # Task-routing accuracy (was printed only before 2026-10-25)
+        self.norm_diagnostics = []           # Per-eval mean ||f||, ||r||, gate, retrieved-branch share
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -206,13 +208,23 @@ class MAVISTrainer:
                         loss_repel = F.relu(topk_sim - 0.20).pow(2).mean()
 
                         # Attention Self-Reconstruction Loss (Attention fidelity on past memories)
-                        if norm_past.size(0) > 128:
-                            perm = torch.randperm(norm_past.size(0), device=self.device)[:128]
-                            recon_q = norm_past[perm]
+                        if getattr(self.model, "use_attention", True):
+                            if norm_past.size(0) > 128:
+                                perm = torch.randperm(norm_past.size(0), device=self.device)[:128]
+                                recon_q = norm_past[perm]
+                            else:
+                                recon_q = norm_past
+                            recon_out = self.model.attention(recon_q, past_protos, chunk_size=64)
+                            # Fixed 2026-10-25. recon_q is unit-norm, but the attention output leaves
+                            # a LayerNorm at length ~sqrt(D)=22.6, so comparing them directly made the
+                            # loss 193x cheaper to satisfy by shrinking the LayerNorm gain than by
+                            # retrieving faithfully. Training duly collapsed the gain (0.90 -> 0.44
+                            # over three tasks), and because that gain sits on the ordinary forward
+                            # retrieval path, the retrieved feature reached the fusion gate at under
+                            # 2% of the fused vector. Comparing directions measures fidelity instead.
+                            loss_recon = F.mse_loss(F.normalize(recon_out, p=2, dim=-1), recon_q)
                         else:
-                            recon_q = norm_past
-                        recon_out = self.model.attention(recon_q, past_protos, chunk_size=64)
-                        loss_recon = F.mse_loss(recon_out, recon_q)
+                            loss_recon = torch.tensor(0.0, device=self.device)
                     else:
                         loss_repel = torch.tensor(0.0, device=self.device)
                         loss_recon = torch.tensor(0.0, device=self.device)
@@ -225,7 +237,12 @@ class MAVISTrainer:
                         if valid_curr.any():
                             curr_labels = torch.arange(start_cls, end_cls, device=self.device)[valid_curr]
                             curr_selected = curr_protos[valid_curr]
-                            curr_vars = torch.full_like(curr_selected, 0.01)  # small default variance for live task
+                            # Fixed 2026-10-25. The live task has no committed variance yet. The old
+                            # hard-coded 0.01 was a raw-feature-space number: against a unit-norm
+                            # prototype it produced noise of length ~1.13, i.e. as large as the signal.
+                            # Borrow the scale from the past classes, which are now measured in the
+                            # prototypes' own space (see models/memory.py update_memory).
+                            curr_vars = torch.full_like(curr_selected, past_vars_replay.mean().item())
                             all_replay_protos = torch.cat([past_protos_replay, curr_selected], dim=0)
                             all_replay_labels = torch.cat([past_labels_replay, curr_labels], dim=0)
                             all_replay_vars = torch.cat([past_vars_replay, curr_vars], dim=0)
@@ -502,6 +519,8 @@ class MAVISTrainer:
         seen_classes = (current_task_id + 1) * self.model.memory_bank.classes_per_task
         classes_per_task = self.model.memory_bank.classes_per_task
         num_tasks_seen = current_task_id + 1
+        norm_acc = {"f_norm": 0.0, "r_norm": 0.0, "gate_mean": 0.0, "r_share": 0.0}
+        norm_batches = 0
 
         def calc_topk_correct(scores, targets, k=5):
             k_val = min(k, scores.size(1))
@@ -532,7 +551,11 @@ class MAVISTrainer:
                         logits, current_features, fused_features = self.model(
                             inputs, return_features=True
                         )
-                        
+                    if getattr(self.model, "last_norms", None):
+                        for k_n in norm_acc:
+                            norm_acc[k_n] += self.model.last_norms[k_n]
+                        norm_batches += 1
+
                     # 1. Aligned Classifier Head Prediction (Flat across seen classes)
                     head_scores = logits[:, :seen_classes]
                     _, pred_head = head_scores.max(1)
@@ -648,6 +671,13 @@ class MAVISTrainer:
         self.accuracy_matrix_top5_ens.append(task_ens_top5_accuracies)
         self.accuracy_matrix_top5_head.append(task_head_top5_accuracies)
         self.accuracy_matrix_top5_hier.append(task_hier_top5_accuracies)
+        self.accuracy_matrix_routing.append(task_routing_accuracies)
+        if norm_batches > 0:
+            diag = {k_n: v / norm_batches for k_n, v in norm_acc.items()}
+            diag["after_task"] = current_task_id + 1
+            self.norm_diagnostics.append(diag)
+            print(f"  [Diag] mean ||f||={diag['f_norm']:.2f} | mean ||r||={diag['r_norm']:.2f} | "
+                  f"mean gate={diag['gate_mean']:.3f} | retrieved share of ||fused||^2={diag['r_share']:.4f}", flush=True)
 
         # Save checkpoint (model weights + accuracy history + EWC state)
         ckpt_path = os.path.join(self.checkpoint_dir, f"mavis_task_{current_task_id+1}.pth")
@@ -679,6 +709,8 @@ class MAVISTrainer:
             json.dump(self.accuracy_matrix_top5_head, f, indent=2)
         with open(metrics_top5_hier_ckpt, "w") as f:
             json.dump(self.accuracy_matrix_top5_hier, f, indent=2)
+        with open(os.path.join(self.checkpoint_dir, "accuracy_matrix_routing.json"), "w") as f:
+            json.dump(self.accuracy_matrix_routing, f, indent=2)
 
     def compute_forgetting(self, matrix=None):
         """Compute average forgetting across all completed tasks."""

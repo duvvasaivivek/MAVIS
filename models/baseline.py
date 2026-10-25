@@ -17,9 +17,13 @@ class BaselineCNN(nn.Module):
     Forward pass:
         Image (B, 3, 64, 64) -> Encoder -> Feature Vector -> Classifier -> Logits
     """
-    def __init__(self, feature_dim: int = 512, total_classes: int = 200):
+    def __init__(self, feature_dim: int = 512, total_classes: int = 200, base_width: int = 128,
+                 dropout_rate: float = 0.0):
         super().__init__()
-        self.encoder = CNNEncoder(feature_dim=feature_dim)
+        # dropout_rate is taken from the same config field MAVIS uses. Before 2026-10-25 this call
+        # passed nothing, so the baseline trained with no dropout while MAVIS trained with 0.5.
+        self.encoder = CNNEncoder(feature_dim=feature_dim, base_width=base_width,
+                                  dropout_rate=dropout_rate)
         self.classifier = IncrementalClassifier(
             feature_dim=feature_dim, 
             total_classes=total_classes

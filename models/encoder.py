@@ -71,26 +71,31 @@ class CNNEncoder(nn.Module):
     """
     ResNet-18 variant designed from scratch for Continual Learning on 64x64 images.
     """
-    def __init__(self, feature_dim: int = 512, dropout_rate: float = 0.0):
+    def __init__(self, feature_dim: int = 512, dropout_rate: float = 0.0, base_width: int = 128):
         super(CNNEncoder, self).__init__()
-        self.in_planes = 128
+        # base_width controls the channel count of the stem and stage 1; stages 2-4 use 2x, 4x, 8x.
+        # The published runs used base_width=128 (channels 128/256/512/1024). GroupNorm(32) requires
+        # every channel count to be a multiple of 32.
+        assert base_width % 32 == 0 and base_width > 0, "base_width must be a positive multiple of 32"
+        self.base_width = base_width
+        self.in_planes = base_width
 
         # Initial layer: 3x3 conv instead of 7x7 to preserve 64x64 spatial resolution
-        self.conv1 = nn.Conv2d(3, 128, kernel_size=3, stride=1, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(32, 128)
+        self.conv1 = nn.Conv2d(3, base_width, kernel_size=3, stride=1, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(32, base_width)
         self.relu = nn.ReLU(inplace=True)
         # No initial MaxPool to preserve spatial dimensions
 
-        self.layer1 = self._make_layer(BasicBlock, 128, 2, stride=1, dropout_rate=dropout_rate)
-        self.layer2 = self._make_layer(BasicBlock, 256, 2, stride=2, dropout_rate=dropout_rate)
-        self.layer3 = self._make_layer(BasicBlock, 512, 2, stride=2, dropout_rate=dropout_rate)
-        self.layer4 = self._make_layer(BasicBlock, 1024, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer1 = self._make_layer(BasicBlock, base_width, 2, stride=1, dropout_rate=dropout_rate)
+        self.layer2 = self._make_layer(BasicBlock, base_width * 2, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer3 = self._make_layer(BasicBlock, base_width * 4, 2, stride=2, dropout_rate=dropout_rate)
+        self.layer4 = self._make_layer(BasicBlock, base_width * 8, 2, stride=2, dropout_rate=dropout_rate)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        
+
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(1024 * BasicBlock.expansion, feature_dim),
+            nn.Linear(base_width * 8 * BasicBlock.expansion, feature_dim),
             nn.LayerNorm(feature_dim)
         )
 

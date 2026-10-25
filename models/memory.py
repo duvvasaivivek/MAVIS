@@ -123,7 +123,14 @@ class MemoryBank(nn.Module):
                 c_feats = torch.stack(class_features[c], dim=0)
                 protos_k = kmeans_prototypes(c_feats, k=self.prototypes_per_class, num_iters=10)
                 self.memory[task_id, c] = protos_k.to(self.memory.device)
-                var_c = c_feats.var(dim=0, unbiased=False) + 1e-4
+                # Fixed 2026-10-25. The variance must be measured in the same space the prototypes
+                # live in. kmeans_prototypes returns unit vectors, but this line used to measure the
+                # spread of the raw encoder features, which leave a LayerNorm at length ~sqrt(D)=22.6.
+                # The replay noise built from it was then ~9x longer than the prototype it was added
+                # to, so a draw kept almost none of its class identity (cosine 0.10 to its own
+                # prototype; a nearest-prototype oracle scored 2.67% against 1.67% chance).
+                # Measuring on normalised features puts the two quantities in one space.
+                var_c = F.normalize(c_feats, p=2, dim=1).var(dim=0, unbiased=False) + 1e-8
                 self.class_variances[task_id, c] = var_c.to(self.memory.device)
 
         self.is_populated[task_id] = True

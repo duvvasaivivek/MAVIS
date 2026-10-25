@@ -1,0 +1,754 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------------------------------------------------------------------------
+% MAVIS Review Walkthrough
+% Compile with: pdflatex MAVIS_REVIEW_WALKTHROUGH.tex  (run twice for the TOC)
+% Fonts match docs/MAVIS_MASTER_ARCHITECTURAL_TREATISE.tex. If newpx/tgheros/
+% inconsolata are missing, comment those four lines out; the document still builds.
+% ---------------------------------------------------------------------------
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{newpxtext}
+\usepackage{newpxmath}
+\usepackage[scaled=0.92]{tgheros}
+\usepackage[scaled=0.88]{inconsolata}
+\linespread{1.06}
+
+\usepackage[a4paper,top=22mm,bottom=22mm,left=20mm,right=20mm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
+\usepackage[
+    colorlinks=true,
+    linkcolor=blue!75!black,
+    urlcolor=blue!75!black,
+    bookmarks=true,
+    bookmarksnumbered=true,
+    pdftitle={MAVIS Review Walkthrough},
+    pdfauthor={Duvva Sai Vivek}
+]{hyperref}
+\usepackage{bookmark}
+
+% --- Helpers ---
+\newcommand{\code}[1]{\texttt{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\setlist{nosep,leftmargin=*}
+\titleformat{\section}{\sffamily\Large\bfseries}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\sffamily\large\bfseries}{\thesubsection}{0.8em}{}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.15}
+
+\title{\sffamily\bfseries MAVIS Review Walkthrough\\[4pt]
+\large Memory Augmented Visual Incremental System: the code in execution order}
+\author{Duvva Sai Vivek}
+\date{22 October 2026}
+
+\begin{document}
+\maketitle
+
+MAVIS is a from-scratch PyTorch system for class-incremental learning on Tiny ImageNet (200 classes, $64 \times 64$ pixels, 10 sequential tasks of 20 classes). It combines a non-parametric prototype memory retrieved by attention with Online Elastic Weight Consolidation, and the full model (M4) reaches 22.24\% top-1 and 49.26\% top-5 across all 200 classes with 12.50\% memory forgetting, against 12.62\% top-1 and 64.76\% forgetting for the naive baseline. This walkthrough follows the code in execution order, top to bottom, and ends with the experiment history and a glossary.
+
+\tableofcontents
+\clearpage
+
+% ===========================================================================
+\section{Problem setup and terminology}
+
+MAVIS solves class-incremental learning (CIL): 200 Tiny ImageNet classes arrive as 10 tasks of 20 classes, and at test time the model must pick the right class among every class seen so far with no task label given. This is the hardest continual-learning setting, because one shared 200-way head must separate classes it never saw together in a batch.
+
+\textbf{Catastrophic forgetting} is the failure mode being fought. Gradient descent on task $t$ overwrites the weights that encoded tasks $1$ to $t-1$. The naive baseline (M1) learns each task to roughly 75\% and then drops Task 1 to near 0\% by the end of Task 10, with 64.76\% average forgetting.
+
+\textbf{Stability versus plasticity} is the trade-off every design choice balances. Stability means old tasks are preserved. Plasticity means new tasks are still learned well. Freezing everything gives stability and no plasticity. Training freely gives the opposite.
+
+\textbf{Two levels of retention} are combined, and this is the thesis of the project:
+\begin{itemize}
+  \item Parameter level: Elastic Weight Consolidation (EWC) adds a quadratic penalty to the loss on weights that mattered for earlier tasks. It never appears in the forward pass.
+  \item Representation level: an external memory bank stores prototype feature vectors of old classes, multi-head attention retrieves from it, and a gated fusion blends retrieved memory into the live feature. This lives inside the forward pass.
+\end{itemize}
+
+\textbf{The four models} form a $2 \times 2$ factorial design so that each mechanism can be credited separately:
+
+\begin{tabularx}{\textwidth}{L{3cm} L{3cm} L{3.4cm} Y}
+\toprule
+Model & Parameter regularization & External memory & Code path \\
+\midrule
+M1 Baseline CNN & none & none & \code{BaselineCNN} + \code{ContinualTrainer}, \code{train\_baseline} \\
+M2 CNN + EWC & Online EWC & none & \code{BaselineCNN} + \code{ContinualTrainer} with \code{ewc\_lambda > 0}, \code{train\_ewc} \\
+M3 Memory only & none & memory bank + attention + fusion & \code{MAVIS} + \code{MAVISTrainer}, \code{train\_mavis --no-ewc} \\
+M4 Full MAVIS & Online EWC & memory bank + attention + fusion & \code{MAVIS} + \code{MAVISTrainer}, \code{train\_mavis} \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Dataset facts}: 100{,}000 training images (500 per class), 10{,}000 validation images (50 per class), $64 \times 64$ RGB, WordNet ids as folder names. No pretrained weights anywhere; the ResNet backbone is trained from random initialization on Task 1.
+
+\textbf{The accuracy matrix} $R$ is the central bookkeeping object. $R_{i,j}$ is the accuracy on task $j$ measured right after finishing training on task $i$, so the matrix is lower triangular and grows one row per task. All four standard metrics are read off it:
+\begin{equation}
+\mathrm{ACC} = \frac{1}{T}\sum_{j=1}^{T} R_{T,j}
+\end{equation}
+\begin{equation}
+F = \frac{1}{T-1}\sum_{j=1}^{T-1}\Big(\max_{t \in \{j,\dots,T-1\}} R_{t,j} - R_{T,j}\Big)
+\end{equation}
+\begin{equation}
+\mathrm{BWT} = \frac{1}{T-1}\sum_{j=1}^{T-1}\big(R_{T,j} - R_{j,j}\big), \qquad \mathrm{LA} = \frac{1}{T}\sum_{j=1}^{T} R_{j,j}
+\end{equation}
+ACC is final average accuracy. $F$ is average forgetting (the drop from the best accuracy a task ever had to its final accuracy). BWT is backward transfer (negative means forgetting). LA is learning accuracy (how well each task was learned when it was new). The project reports ACC and $F$ for every predictor, and also top-5 versions.
+
+\textbf{Vocabulary that appears everywhere in the code}: \code{task\_id} is 0-indexed in trainers and loaders but \code{TaskGenerator.get\_task()} is 1-indexed. A local label is 0 to 19 inside a task; an absolute label is \code{task\_id * 20 + local}. ``Seen classes'' means all classes from tasks 0 to the current one. ``Active task'' means the one being trained right now. A ``prototype'' is a stored 512-dimensional unit feature vector standing in for a class. $E_0$ is the encoder snapshot after Task 1, $E_{t-1}$ is the snapshot after the previous task.
+
+% ===========================================================================
+\section{At a glance}
+
+Memory sits in the forward pass; EWC sits only in the loss.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  font=\small\sffamily,
+  box/.style={draw, rounded corners=3pt, align=center, minimum height=1.35cm, text width=2.5cm, inner sep=4pt},
+  mem/.style={box, fill=gray!12},
+  main/.style={box, draw=blue!60!black, line width=1.2pt, fill=blue!8},
+  loss/.style={draw, rounded corners=3pt, align=center, minimum height=1.35cm, text width=3.3cm, inner sep=4pt},
+  arr/.style={-{Latex[length=2mm]}, thick},
+  lbl/.style={font=\footnotesize\sffamily\color{black!60}}
+]
+% forward pass row
+\node[box] (in)   at (0,0)   {\textbf{Input image}\\\scriptsize $64{\times}64{\times}3$ RGB\\\scriptsize 7 augmentations};
+\node[box] (enc)  at (3.2,0) {\textbf{CNN encoder}\\\scriptsize ResNet-18, GN, SE\\\scriptsize $f$: 512-d};
+\node[main] (fus) at (6.4,0) {\textbf{Gated fusion}\\\scriptsize $g=\sigma(W[f;r])$\\\scriptsize $g\!\cdot\! f+(1\!-\!g)\!\cdot\! r$};
+\node[box] (head) at (9.6,0) {\textbf{Cosine head}\\\scriptsize $24\cdot\cos(\hat f,\hat w)$\\\scriptsize margin 0.20};
+\node[box] (log)  at (12.8,0){\textbf{Logits (200)}\\\scriptsize masked in\\\scriptsize the trainer};
+% memory row
+\node[mem] (mem)  at (0,-3.2)   {\textbf{Memory bank}\\\scriptsize 10 protos/class\\\scriptsize K-means, frozen};
+\node[mem] (att)  at (6.4,-3.2) {\textbf{Attention}\\\scriptsize 4 heads, $\tau=0.5$\\\scriptsize $r$: 512-d};
+% arrows
+\draw[arr] (in) -- (enc);
+\draw[arr] (enc) -- node[lbl,above]{$f$} (fus);
+\draw[arr] (fus) -- (head);
+\draw[arr] (head) -- (log);
+\draw[arr] (mem) -- node[lbl,above]{keys, values} (att);
+\draw[arr] (enc.south) ++(0.5,0) |- ++(0,-1.0) -| node[lbl,above,pos=0.25]{query $f$} ([xshift=-0.5cm]att.north);
+\draw[arr] ([xshift=0.5cm]att.north) -- node[lbl,right]{$r$} ([xshift=0.5cm]fus.south);
+\draw[arr, dashed] (enc.south) ++(-0.5,0) |- ++(0,-1.0) -| node[lbl,above,pos=0.25]{commit after task} (mem.north);
+% losses band
+\node[loss] (ewc)   at (0.9,-6.3)  {\textbf{EWC penalty}\\\scriptsize $\tfrac{\lambda}{2}\sum F(\theta-\theta^*)^2$\\\scriptsize on every weight};
+\node[loss] (dist)  at (4.6,-6.3)  {\textbf{Distillation}\\\scriptsize cos to $E_0$ and $E_{t-1}$\\\scriptsize PODNet on $f_3,f_4$};
+\node[loss] (meml)  at (8.3,-6.3)  {\textbf{Memory losses}\\\scriptsize InfoNCE, top-32 repel\\\scriptsize attention recon};
+\node[loss] (headl) at (12.0,-6.3) {\textbf{Head losses}\\\scriptsize task-masked CE\\\scriptsize Gaussian replay};
+\begin{scope}[on background layer]
+\node[draw, rounded corners=3pt, fit=(ewc)(dist)(meml)(headl), inner sep=8pt, label={[font=\small\sffamily\bfseries,anchor=south west]north west:Training losses and where each attaches}] {};
+\end{scope}
+\end{tikzpicture}
+\caption{MAVIS forward pass and loss attachment points.}
+\end{figure}
+
+The top row is the forward pass every image takes. The shaded boxes are the memory path: the encoder's feature queries attention over frozen prototypes, and the retrieved vector is blended into the feature by a learned gate before the cosine head. The dashed line is the once-per-task commit of new prototypes. The bottom band lists the training losses by what they constrain; only the first is parameter-level, the rest act on features or the head.
+
+% ===========================================================================
+\section{Step 1. Entry point and configuration}
+
+Everything starts in \code{main.py}, which parses one command, builds a config object, and dispatches to a training function. Before any import of the project it sets the environment variable \code{TRITON\_DISABLE=1} (the HPC cluster's Triton compiler crashed on Python 3.14) and wraps stdout in a UTF-8 writer so Windows consoles do not crash on symbols.
+
+\textbf{Commands and flags}:
+
+\begin{tabularx}{\textwidth}{L{3cm} Y L{5.2cm}}
+\toprule
+Command & What it does & Output \\
+\midrule
+\code{setup} / \code{verify} & checks PyTorch and CUDA, enables cuDNN benchmark, downloads the dataset if missing & console \\
+\code{config} & prints the active config summary & console \\
+\code{visualize} & renders 5 sample images for each of the 10 tasks & \code{results/figures/task\_samples.png} \\
+\code{train\_baseline} & M1 & \code{results/raw/baseline\_results.json}, checkpoints in \code{results/checkpoints/baseline} \\
+\code{train\_ewc} & M2 & \code{results/raw/ewc\_results.json}, checkpoints in \code{results/checkpoints/ewc} \\
+\code{train\_mavis} & M4 (or M3 with \code{--no-ewc}) & \code{results/raw/mavis\_results.json} or \code{mavis\_m3\_results.json}, checkpoints in \code{results/checkpoints/mavis} or \code{mavis\_m3} \\
+\bottomrule
+\end{tabularx}
+
+Flags: \code{--config <yaml>} loads a YAML instead of defaults; \code{--epochs N} overrides epochs per task; \code{--ewc-lambda F} overrides the EWC strength; \code{--no-ewc} sets \code{config.ewc.enabled = False} (M3 ablation); \code{--fresh} deletes existing MAVIS checkpoints and starts at Task 1 instead of auto-resuming.
+
+\textbf{Configuration} lives in \code{config.py} as nested Python dataclasses, assembled into one \code{MAVISConfig}. Each sub-config owns one concern:
+
+\begin{tabularx}{\textwidth}{L{3.6cm} Y}
+\toprule
+Dataclass & Owns \\
+\midrule
+\code{DatasetConfig} & data path, $64 \times 64 \times 3$, 200 classes, 20 classes per task, 10 tasks, seed 42 \\
+\code{AugmentationConfig} & which augmentations are on and their strengths \\
+\code{TrainingConfig} & batch size, epochs, learning rate, all loss weights, finetune settings \\
+\code{EncoderConfig} & feature dimension 512, dropout 0.5 (the \code{channels} and \code{use\_batch\_norm} fields are not read by the encoder) \\
+\code{ClassifierConfig} & 200 outputs, cosine margin 0.20 \\
+\code{EWCConfig} & enabled flag, lambda 5000, 2000 Fisher samples, decay gamma 0.88 \\
+\code{MemoryConfig} & capacity 2000, feature dim 512, 10 prototypes per class \\
+\code{AttentionConfig} & 4 heads, temperature 0.5 (the key/query/value dim fields are not read; the attention uses 512 throughout) \\
+\code{FusionConfig} & fusion dim 512 \\
+\bottomrule
+\end{tabularx}
+
+\code{MAVISConfig.save()} dumps to YAML and \code{MAVISConfig.load()} reads YAML back, silently dropping any key that is not a dataclass field and falling back to the project data directory when the serialized \code{data\_dir} does not exist on the current machine. Running \code{python config.py} regenerates the four YAML files in \code{configs/}. The YAMLs are convenience snapshots; the dataclass defaults are the source of truth and are what the SLURM jobs used.
+
+\textbf{Config to trainer hand-off}: \code{train\_mavis} reads each loss weight from \code{config.training} with \code{getattr} defaults, builds the \code{MAVIS} model from the whole config, and passes the weights into \code{MAVISTrainer} as plain keyword arguments. The trainer never sees the config object.
+
+% ===========================================================================
+\section{Step 2. Data pipeline}
+
+The pipeline turns the raw Tiny ImageNet zip into 10 deterministic per-task PyTorch DataLoaders whose labels are local 0 to 19. Four files do this in order.
+
+\textbf{Download and layout} (\code{data/download.py}). The zip is fetched from the Stanford cs231n URL with a progress callback and extracted into \code{data/tiny-imagenet-200}. Training images already sit in \code{train/<wnid>/images/}. Validation images arrive flat with a \code{val\_annotations.txt} mapping file, so \code{prepare\_tiny\_imagenet\_val} moves each one into \code{val/<wnid>/images/} to mirror the training layout (with a retry loop for Windows file locks). \code{verify\_dataset} counts classes and images and reads one sample's dimensions.
+
+\textbf{Task generation} (\code{data/task\_generator.py}). \code{TaskGenerator} lists the 200 WordNet folder names, sorts them so the global index of a class is stable, then draws a permutation of 0 to 199 with \code{numpy.random.RandomState(42)}. Consecutive slices of 20 become \code{TaskDefinition} objects (1-indexed \code{task\_id}, global class indices, folder names). \code{validate()} asserts no overlap, 20 classes each, and full coverage. \code{save\_definitions()} writes \code{configs/task\_definitions.json} so the exact class order is recorded and reproducible. Every model (M1 to M4) sees the same class order because they all build the generator from the same seed.
+
+\textbf{Dataset and loaders} (\code{data/tiny\_imagenet.py}). \code{TinyImageNetTaskDataset} takes the list of folder names for one task and enumerates them; the label it returns is the position of the folder in that list, so labels are always 0 to 19 regardless of task. Every image of the task is decoded with PIL at construction time and held in RAM (about 120 MB per task). This preloading exists because multi-worker DataLoaders deadlocked on POSIX semaphores on the cluster's Python 3.14, so \code{num\_workers} is hard-coded to 0 everywhere. \code{TinyImageNetLoader} builds a shuffled training loader and an unshuffled validation loader per task, batch size 128, \code{pin\_memory=True}, and a cumulative validation loader that is defined but not used by the trainers.
+
+\textbf{Augmentation} (\code{data/augmentation.py}). Training transforms run in this fixed order on $64 \times 64$ PIL images:
+\begin{enumerate}
+  \item \code{RandomCrop(64, padding=4)}: zero-pad to 72 and crop back, a small translation.
+  \item \code{RandomHorizontalFlip()}.
+  \item \code{RandomRotation(10)}: rotate uniformly in $[-10, +10]$ degrees.
+  \item \code{ColorJitter}: brightness, contrast, saturation each by factor 0.2, hue by 0.1.
+  \item \code{ToTensor()}: to a $[0, 1]$ float tensor of shape $3 \times 64 \times 64$.
+  \item \code{RandomErasing(p=0.25, scale=(0.02, 0.20), ratio=(0.3, 3.3), value=0)}: cutout of a random rectangle, 2\% to 20\% of the area.
+  \item \code{Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])}: ImageNet statistics.
+\end{enumerate}
+Evaluation uses only steps 5 and 7. \code{mixup} and \code{cutmix} flags exist in the config but are false and not implemented. The harsh 224-pixel AutoAugment policy was removed in Phase 4 because it destroyed detail at 64 pixels.
+
+\textbf{Label offset convention}. Because datasets emit local labels, every trainer converts to absolute class ids with \code{targets + task\_id * 20} before computing any loss or accuracy against the 200-way head, and converts back with \code{targets - start\_cls} for task-local losses. This is the single most common source of bugs in the codebase and worth stating explicitly in a review.
+
+% ===========================================================================
+\section{Step 3. CNN encoder backbone}
+
+\code{models/encoder.py} defines \code{CNNEncoder}, a ResNet-18-shaped network built from scratch for $64 \times 64$ inputs that maps an image to a 512-dimensional feature vector $f$. It is shared by every model; the baseline uses it with dropout 0 and MAVIS uses it with dropout 0.5.
+
+\textbf{Stem}. A $3 \times 3$ convolution (3 to 128 channels, stride 1, no bias) followed by \code{GroupNorm(32, 128)} and ReLU. There is no $7 \times 7$ convolution and no initial max-pool, so the spatial size stays $64 \times 64$ into the first stage. Standard ImageNet ResNets would shrink 64 pixels to 16 before any residual block, which throws away most of the signal at this resolution.
+
+\textbf{Residual block} (\code{BasicBlock}, expansion 1). Each block computes:
+\begin{enumerate}
+  \item \code{conv3x3} then \code{GroupNorm(32)} then ReLU
+  \item \code{Dropout2d(p)} (whole channels dropped, $p = 0.5$ in MAVIS)
+  \item \code{conv3x3} then \code{GroupNorm(32)}
+  \item Squeeze-and-Excitation reweighting (below)
+  \item add the shortcut (identity, or a $1 \times 1$ stride-2 convolution plus GroupNorm when the shape changes)
+  \item ReLU
+\end{enumerate}
+
+\textbf{Squeeze-and-Excitation} (\code{SEBlock}). Global average pool to one value per channel, a bottleneck \code{Linear(C, max(C/16, 8))} with ReLU, a \code{Linear} back to $C$ with sigmoid, and the result multiplies every channel of the block output. This learns which channels matter for the current image, so it is a channel attention mechanism inside the backbone, distinct from the memory attention later.
+
+\textbf{Stage dimensions} (two blocks per stage, stride on the first block of stages 2 to 4):
+
+\begin{tabularx}{\textwidth}{L{2cm} L{2cm} L{2.5cm} Y}
+\toprule
+Stage & Channels & Spatial & Used as \\
+\midrule
+stem & 128 & $64 \times 64$ & \\
+layer1 & 128 & $64 \times 64$ & \\
+layer2 & 256 & $32 \times 32$ & \\
+layer3 & 512 & $16 \times 16$ & $f_3$, spatial distillation tap \\
+layer4 & 1024 & $8 \times 8$ & $f_4$, spatial distillation tap \\
+head & 512 & $1 \times 1$ & $f$, the feature vector \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Projection head}. \code{AdaptiveAvgPool2d(1)} then \code{Flatten} then \code{Linear(1024, 512)} then \code{LayerNorm(512)}. The LayerNorm keeps feature scale stable across tasks, which matters because so many later losses use cosine similarity on $f$. When called with \code{return\_spatial=True} the encoder also returns the list \code{[f3, f4]} for the PODNet spatial distillation loss.
+
+\textbf{Why GroupNorm instead of BatchNorm}. BatchNorm keeps running mean and variance estimated from the batches it sees. In continual learning every batch belongs to the active task, so those statistics drift to the newest classes and silently corrupt the features of older classes at evaluation time. GroupNorm normalizes 32 channel groups within each sample and keeps no cross-task state, so this contamination cannot happen. The README still says BatchNorm; the code uses GroupNorm everywhere.
+
+\textbf{Every activation and normalization in the project}, for quick recall:
+
+\begin{tabularx}{\textwidth}{L{3.8cm} Y L{4.6cm}}
+\toprule
+Function & Where & Role \\
+\midrule
+ReLU & every conv block, SE bottleneck & non-linearity \\
+Sigmoid & SE channel gate, fusion gate & squashes to $(0, 1)$ for gating \\
+Softmax & attention weights, every evaluation probability, InfoNCE, replay CE & turns scores into a distribution \\
+GroupNorm(32) & all convolutions & batch-independent normalization \\
+LayerNorm & encoder output, attention output & per-vector normalization \\
+L2 normalization (\code{F.normalize}) & cosine classifier, prototypes, NCM, all contrastive losses & puts vectors on the unit sphere so dot product equals cosine \\
+Dropout2d(0.5), Dropout(0.1) & residual blocks, attention weights & regularization \\
+\bottomrule
+\end{tabularx}
+
+The backbone has no tanh, GELU, or other activations.
+
+% ===========================================================================
+\section{Step 4. Cosine classifier head}
+
+\code{models/classifier.py} maps the 512-dimensional feature to 200 logits with a cosine-similarity layer rather than a plain linear layer. The whole point is that every class weight has the same norm, so a newly trained task cannot win just by having bigger weights.
+
+\textbf{CosineLinear}. The weight matrix $W$ is $200 \times 512$ (Kaiming-uniform initialized). On every forward pass both the feature $x$ and each weight row are L2-normalized, so their dot product is the cosine of the angle between them, bounded in $[-1, 1]$. That is multiplied by a fixed scale $s = 24$ so that softmax can become confident, and by a per-class \code{task\_scale} buffer $\tau_c$ (all ones by default):
+\begin{equation}
+z_c = s \cdot \tau_c \cdot \cos\big(\hat{x}, \hat{w}_c\big), \qquad \hat{x} = \frac{x}{\lVert x \rVert}, \; \hat{w}_c = \frac{w_c}{\lVert w_c \rVert}
+\end{equation}
+
+\textbf{Additive cosine margin} ($m = 0.20$, MAVIS only). During training, when targets are supplied, the cosine of the true class $y$ is reduced by $m$ before scaling:
+\begin{equation}
+z_{y} = s \cdot \tau_y \cdot \big(\cos(\hat{x}, \hat{w}_y) - m\big)
+\end{equation}
+This forces the feature to be at least an angular margin closer to its own class weight than to any other, which tightens intra-class clusters and widens inter-class gaps (the CosFace idea). The margin is only applied when \code{targets} is passed; the post-task balanced finetune deliberately passes \code{targets=None} so calibration is measured on the true cosine (Job 67 fix).
+
+\textbf{Why cosine for continual learning}. With a plain linear head, AdamW weight decay shrinks weights that stop receiving gradient, which is exactly what happens to old-class weights once their task is over, and new-class weights grow large during their 50 epochs. That norm imbalance alone creates recency bias: the head predicts recent classes regardless of the feature. Normalizing removes the norm from the decision so only direction matters.
+
+\textbf{Weight Aligning} (\code{align\_weights}). The original WA method (CVPR 2020) rescales new-class weights by the ratio of old to new weight norms. On a cosine head that ratio is identically 1.0, so the method was reduced to its current form: after each task it sets \code{task\_scale[:seen] = 1.0}, guaranteeing every seen class is scored at the same temperature. In practice this is a no-op safeguard, and the real anti-recency work moved to the balanced finetuning step.
+
+\textbf{IncrementalClassifier} is a thin wrapper holding one \code{CosineLinear} with all 200 outputs from the start. The head never grows. Which logits count is decided outside, in the trainer, by slicing: \code{logits[:, start:end]} for the active task during training, \code{logits[:, :seen]} at evaluation. The baseline models use the same class with margin 0.
+
+% ===========================================================================
+\section{Step 5. Multi-prototype memory bank}
+
+\code{models/memory.py} defines \code{MemoryBank}, the non-parametric half of MAVIS. It stores 10 unit-norm prototype vectors per class (2{,}000 entries of 512 floats, about 4 MB) plus a diagonal variance per class, and it is never touched by the optimizer.
+
+\textbf{Tensor layout}. All state is registered buffers, so it travels inside \code{state\_dict} and checkpoints but receives no gradient:
+
+\begin{tabularx}{\textwidth}{L{3.6cm} L{5cm} Y}
+\toprule
+Buffer & Shape & Holds \\
+\midrule
+\code{memory} & [10 tasks, 20 classes, $K{=}10$, 512] & locked prototypes \\
+\code{is\_populated} & [10] bool & which tasks have been committed \\
+\code{class\_variances} & [10, 20, 512] & per-class diagonal feature variance plus $10^{-4}$ \\
+\code{running\_prototypes} & [20, 512] & EMA mean of the active task's classes, during training \\
+\code{running\_counts} & [20] & how many batches have updated each running prototype \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Committing a task} (\code{update\_memory}). After a task is trained, the encoder is put in eval mode and every training image of the task is encoded once under autocast. Features are grouped by class on the CPU, and for each class two things are computed: $K = 10$ centroids by a pure-PyTorch K-means (\code{kmeans\_prototypes}: evenly spaced initial picks along the feature list, 10 iterations of \code{cdist}, \code{argmin}, and mean, then L2-normalize; if a class has fewer than $K$ features they are repeated), and the biased diagonal variance of the raw features. Then \code{is\_populated[task]} is set and the running prototypes are reset. Prototypes are built from training data only, never validation, to avoid leakage.
+
+\textbf{Why $K$ prototypes instead of one mean}. A single class mean collapses a multi-modal class (a dog from the front, the side, in snow) into one point that may sit in empty space. Ten sub-cluster centroids follow the real distribution, and nearest-class-mean scoring takes the best of the ten. $K$ went 1 to 3 to 5 to 7 to 10 across the project, each step improving memory coverage.
+
+\textbf{Running prototypes} (\code{update\_running\_prototypes}). During training of the active task, after every batch and without gradient, each class present in the batch updates its running vector with an exponential moving average, 0.92 old plus 0.08 batch mean. This exists so the attention module has valid keys for the current task from the first epoch, and so the InfoNCE prototype loss has targets, before the task has been committed.
+
+\textbf{Retrieval APIs}, which define what the model is allowed to see when:
+
+\begin{tabularx}{\textwidth}{L{4.6cm} Y L{3.6cm}}
+\toprule
+Method & Returns & Used by \\
+\midrule
+\code{get\_past\_memories(t)} & prototypes of tasks $< t$, flattened $[N \cdot K, 512]$ & repulsion loss \\
+\code{get\_training\_memories(t)} & past memories plus normalized running prototypes of task $t$ & \code{MAVIS.forward} during training \\
+\code{get\_all\_populated\_memories()} & every committed prototype & \code{MAVIS.forward} at evaluation and \code{fuse\_features} \\
+\code{get\_past\_prototypes\_and\_labels(t)} & prototypes, absolute labels, and variances repeated per prototype for tasks $< t$ & Gaussian replay loss \\
+\code{get\_mean\_class\_prototypes()} & mean over $K$ per class & diagnostics \\
+\code{compute\_ncm\_scores(f)} & cosine of $f$ to every prototype, max over the $K$ per class, shape $[B, \mathrm{seen}]$ & NCM predictor at evaluation \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Nearest class mean (NCM)} is therefore a multi-prototype cosine classifier that needs no trainable weights:
+\begin{equation}
+s_{\mathrm{NCM}}(c) = \max_{k \in 1..K} \; \hat{f}^{\top} \hat{p}_{c,k}
+\end{equation}
+
+\textbf{Gaussian covariance replay} uses the stored variance to synthesize pseudo-features of old classes without storing any images: a prototype plus Gaussian noise scaled by half the per-dimension standard deviation, then re-normalized. This gives the classifier head a cloud around each old class to train against, which is how cross-task discrimination is learned at zero image storage cost.
+
+\textbf{Memory budget}. The method stores 2{,}000 vectors of 512 floats plus 200 variance vectors, no raw images, so it meets the fixed-memory constraint in the research question.
+
+% ===========================================================================
+\section{Step 6. Attention retrieval and gated fusion}
+
+\code{models/attention.py} retrieves a memory-conditioned vector $r$ for each live feature $f$, and \code{models/mavis.py} blends $f$ and $r$ with a learned gate before classification. This is the only place where the memory bank enters the forward data flow.
+
+\textbf{ManualMultiHeadAttention}. A hand-written multi-head attention with embed dimension 512, 4 heads, head dimension 128, and four linear projections (query, key, value, output). It exists instead of \code{nn.MultiheadAttention} because the cluster's PyTorch tried to compile Triton FP16 kernels for 4-D matmuls and crashed, so the module forces FP32 inside an \code{autocast(enabled=False)} block and reshapes to 3-D so \code{torch.bmm} hits pre-compiled cuBLAS. Do not revert this.
+
+The computation per head, with temperature $\tau = 0.5$ sharpening the softmax:
+\begin{equation}
+Q = W_Q f, \quad K = W_K M, \quad V = W_V M, \qquad A = \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\tau \sqrt{d_k}}\right), \qquad r = W_O \, (A V)
+\end{equation}
+Here $f$ is the live feature (one query token per image), $M$ is the prototype matrix ($N$ keys, up to 2{,}000 at Task 10), $d_k = 128$. Dividing by $\tau = 0.5$ doubles the logits, which makes the attention distribution peakier. Without it, attending over hundreds of near-equidistant unit vectors averages them into a bland retrieved vector (entropy dispersion). Dropout 0.1 is applied to the attention weights during training.
+
+\textbf{MemoryAttention} wraps the attention with three continual-learning specifics:
+\begin{itemize}
+  \item The query is \code{f.unsqueeze(1)} (shape $[B, 1, 512]$) and the keys and values are the prototypes repeated per batch element ($[B, N, 512]$). \code{repeat} is used instead of \code{expand} because zero-stride tensors crashed the C++ SDPA backend.
+  \item Task 1 has no past memory. Returning zeros would create a distribution shift between Task 1 and later tasks, so a learned \code{no\_memory\_embed} parameter (initialized at std 0.01) is returned instead.
+  \item Queries are processed in chunks of 64 to bound the $[B, N, 512]$ key tensor, which fixed a CUDA out-of-memory at Task 7 in Job 69.
+\end{itemize}
+The retrieved vector passes through \code{LayerNorm(512)} before fusion.
+
+\textbf{Which memories are visible}. In \code{MAVIS.forward}, passing \code{task\_id=t} during training retrieves from committed tasks below $t$ plus the running prototypes of task $t$. Passing \code{task\_id=None} at evaluation retrieves from every committed task. The model itself never masks logits; that is the trainer's job.
+
+\textbf{Gated fusion}. The live feature and retrieved vector are concatenated into a 1{,}024-vector, passed through one \code{Linear(1024, 512)} and a sigmoid, and the result gates the blend per dimension:
+\begin{equation}
+g_{\mathrm{raw}} = \sigma\big(W_g [f ; r] + b_g\big), \qquad g = 0.05 + 0.90\, g_{\mathrm{raw}}, \qquad f_{\mathrm{fused}} = g \odot f + (1 - g) \odot r
+\end{equation}
+The gate weights and bias are zero-initialized so the first forward pass is an exact 50/50 blend. The clamp to $[0.05, 0.95]$ guarantees the memory path never fully switches off and the live path never fully dominates, which was found necessary for retrieval to keep mattering in late tasks. The gate is a single layer on purpose: a deeper gate overfit to the active task.
+
+\textbf{fuse\_features}. The same attention plus gate path, applied to prototype vectors instead of images and returning L2-normalized output, in chunks of 64. It is used so that replayed pseudo-features and finetuning inputs go through the exact transformation the head sees at evaluation time (feature distribution harmonization, Job 67 fix). Before this, the head was trained on raw prototypes but evaluated on fused features, a train/test mismatch.
+
+\textbf{Parameters in the memory path}: four $512 \times 512$ projections, one LayerNorm, the $1 \times 512$ no-memory embedding, and the $1024 \times 512$ gate. These are all protected by EWC in M4 and all receive the full learning rate in every task.
+
+% ===========================================================================
+\section{Step 7. Online Elastic Weight Consolidation}
+
+\code{continual/ewc.py} implements the parameter-level half of MAVIS. EWC treats the weights that mattered for old tasks as springs anchored at their old values, and the Fisher information decides how stiff each spring is. It is a loss term only; nothing about it exists in the forward pass.
+
+\textbf{The idea} (Kirkpatrick et al., PNAS 2017). After training task A, the posterior over weights is approximated by a Gaussian centred at the trained weights with precision given by the diagonal Fisher information $F$. Training task B then minimizes its own loss plus a quadratic pull back toward the task-A weights, weighted by $F$, so weights that were important for A barely move and unimportant ones move freely.
+
+\textbf{Diagonal Fisher} (\code{compute\_fisher}). For each parameter, the Fisher is the expected squared gradient of the log-likelihood:
+\begin{equation}
+F_i = \mathbb{E}_{x,y}\left[\left(\frac{\partial \log p(y \mid x;\theta)}{\partial \theta_i}\right)^2\right]
+\end{equation}
+Implementation: model in eval mode, iterate the finished task's training loader up to 2{,}000 samples, compute \code{log\_softmax} over the seen classes only (logits sliced to \code{[:end\_cls]}), \code{nll\_loss} on the true labels, backpropagate, accumulate \code{grad ** 2} per parameter, and divide by the number of batches. Slicing to seen classes means classes not yet seen get exactly zero Fisher, so they keep full plasticity when their task arrives (Phase 5 fix). For MAVIS the model is called with \code{return\_features=True} and the first output taken.
+
+\textbf{Online variant} (\code{OnlineEWC}, Schwarz et al., ICML 2018). Rather than keeping one Fisher and one weight snapshot per past task (which would mean 9 penalties fighting each other by Task 10), a single running Fisher is kept and decayed:
+\begin{equation}
+F^{\mathrm{run}} \leftarrow \gamma\, F^{\mathrm{run}} + F^{\mathrm{new}}, \qquad \theta^{*} \leftarrow \theta \text{ (after the task)}
+\end{equation}
+With $\gamma = 0.88$, a task's curvature is weighted $0.88^9 \approx 0.32$ by Task 10. Early tasks are still protected but no longer freeze the network. The default $\gamma$ inside the class is 0.95; the MAVIS trainer passes 0.88 and the baseline trainer does not pass it, so M2 ran with 0.95.
+
+\textbf{Penalty} (\code{penalty}), added to the loss on every batch once at least one task is complete:
+\begin{equation}
+\mathcal{L}_{\mathrm{EWC}} = \frac{\lambda}{2} \sum_i F^{\mathrm{run}}_i \big(\theta_i - \theta_i^{*}\big)^2
+\end{equation}
+It loops over every parameter with \code{requires\_grad}, so in MAVIS it covers the encoder, the attention projections, the fusion gate, and the cosine head. The memory bank is buffers, not parameters, so it is outside EWC by construction.
+
+\textbf{Lambda calibration}. Standalone EWC (M2) used $\lambda = 50{,}000$ because nothing else restrained the weights. In MAVIS the distillation terms already pull on the encoder, so $\lambda$ was set at 2{,}000 and then raised to 5{,}000 after Job 64 showed the penalty was only 2.8\% of the total loss and not constraining anything; at 5{,}000 it contributes roughly 10\% to 12\% of the gradient magnitude.
+
+\textbf{Persistence}. \code{state\_dict()} and \code{load\_state\_dict()} serialize the running Fisher, the anchor weights, the task count, $\lambda$, and $\gamma$ to \code{mavis\_ewc\_task\_\{t\}.pth}, which is what makes resuming a MAVIS run after a cluster time limit exact.
+
+\textbf{Known limitation, stated in the treatise}: the diagonal Fisher is only a local quadratic approximation at the anchor. Over 10 tasks the weight trajectory leaves that basin, which is why EWC alone (M2) gains only 0.54 points over the baseline and why the representation-level memory is needed.
+
+% ===========================================================================
+\section{Step 8. Baseline and EWC training loop (M1, M2)}
+
+\code{continual/trainer.py} defines \code{ContinualTrainer}, the simple loop that produces the two reference points. It trains \code{BaselineCNN} (encoder plus cosine head, margin 0, dropout 0) one task at a time and records the accuracy matrix. M1 and M2 are the same code; M2 is M1 with \code{ewc\_lambda > 0}.
+
+\textbf{Per-task training}:
+\begin{enumerate}
+  \item Fetch the task's training loader.
+  \item Build a fresh \code{AdamW} over all parameters, learning rate 0.008, weight decay $10^{-2}$, and a \code{OneCycleLR} schedule over epochs $\times$ steps per epoch with default warm-up (30\% rising, then annealing).
+  \item For each of the 50 epochs and each batch: offset labels to absolute ids, run the model under \code{torch.amp.autocast} (FP16), compute cross-entropy with label smoothing 0.1 over all 200 logits, add the EWC penalty if at least one task is complete, scale the loss with \code{GradScaler}, step, and step the scheduler only if the scaler did not skip the optimizer step (avoids a PyTorch warning about scheduler order).
+  \item After the epochs, if EWC is on, call \code{OnlineEWC.update} with the training loader and \code{fisher\_samples} to refresh the running Fisher and snapshot the weights.
+\end{enumerate}
+
+\textbf{Evaluation} (\code{evaluate\_all\_tasks}): put the model in eval mode, run every validation loader from task 0 to the current task, take the argmax over all 200 logits (not just seen classes), and append one row of per-task accuracies to the matrix. Save \code{model\_task\_\{t\}.pth}.
+
+\textbf{Forgetting} (\code{compute\_forgetting}): the standard formula from Section 1 over the matrix so far.
+
+\textbf{Why the baseline collapses}, in terms of this loop. Cross-entropy over all 200 logits pushes every non-target logit down on every batch. During task $t$ all targets belong to task $t$, so the 180 (or fewer) old-class logits receive only negative gradient for 50 epochs, and their cosine weights rotate away from any feature. Nothing restores them. In M2, EWC slows the rotation of important weights but cannot stop the head's old rows from being driven down, which is why M2's forgetting is still 65.39\% and its gain is only 0.54 points. This observation is what motivated task-masked cross-entropy in the MAVIS trainer.
+
+\textbf{Recorded settings for the logged runs}: M2 used $\lambda = 50{,}000$, 1{,}000 Fisher samples, $\gamma = 0.95$. The current \code{config.py} default $\lambda$ of 5{,}000 is tuned for M4, so re-running \code{train\_ewc} with defaults does not reproduce the logged M2 numbers; pass \code{--ewc-lambda 50000}.
+
+% ===========================================================================
+\section{Step 9. MAVIS training loop (M3, M4)}
+
+\code{continual/mavis\_trainer.py} \code{MAVISTrainer.train\_task} is the heart of the project. For one task it runs 50 epochs of a combined loss with up to eight terms, then hands off to the post-task pipeline in Step 10. M3 is this loop with the EWC term switched off.
+
+\textbf{Differential learning rates}. \code{AdamW} with weight decay $10^{-2}$ and four parameter groups: encoder, attention, fusion gate, classifier. On Task 1 every group uses the full rate 0.008 so the backbone can learn from scratch. On tasks 2 to 10 the encoder's rate is damped by a factor that decays gently with task index, $\max(0.15,\; 0.20 - 0.007\,(\mathrm{task\_id} - 1))$, so 0.20 on Task 2 down to 0.15 by Task 9, while attention, gate, and head keep the full rate. The backbone is where old knowledge lives; the head and memory path are where new knowledge is most cheaply absorbed.
+
+\textbf{Schedule}. \code{OneCycleLR} with \code{pct\_start=0.15}, cosine annealing, \code{div\_factor=10}, \code{final\_div\_factor=100}: a short 7-epoch ramp from 0.0008 to 0.008, then 43 epochs of cosine descent to $8 \times 10^{-6}$. This long descent is what got training accuracy above 90\% on each task.
+
+\textbf{Distillation warm-up}. For tasks after the first, the two distillation weights are multiplied by $\alpha_t = \min(1,\; 0.5 + 0.5 \cdot \mathrm{epoch} / 5)$, so distillation starts at half strength and reaches full strength at epoch 5. Early plasticity for the new classes, then the clamp tightens.
+
+\textbf{Forward pass per batch}. The model is called with \code{task\_id}, \code{targets} (for the cosine margin), and \code{return\_spatials=True}, returning logits, the raw feature $f$, the fused feature, and $[f_3, f_4]$. Immediately after, the running prototypes are updated without gradient from $f$ and the local labels.
+
+\textbf{The loss terms}, with every weight and formula. Hats denote L2-normalized vectors, $y$ the local label, $B$ the batch:
+
+\begin{tabularx}{\textwidth}{L{2.8cm} Y L{2cm} L{4.2cm}}
+\toprule
+Term & Formula & Weight & What it protects or teaches \\
+\midrule
+Task-masked CE & cross-entropy over the 20 active logits only, label smoothing 0.02, margin 0.20 on the true class & 1.0 & learns the new classes without sending negative gradient to old-class weights \\
+Feature distillation & $\tfrac12(1 - \cos(f, E_{t-1}(x))) + \tfrac12(1 - \cos(f, E_0(x)))$ & $3.0\,\alpha_t$ & keeps the feature direction anchored to both the previous encoder and the Task-1 encoder, bounding cumulative drift \\
+Spatial distillation (PODNet) & for $f_3$ and $f_4$: pool along width and along height, flatten, normalize, $1 - \cos$ against the old encoder's maps, average & $1.5\,\alpha_t$ & keeps where in the image the backbone looks, not just the final vector \\
+Prototype InfoNCE & cross-entropy of $\hat f^{\top}\hat P / 0.20$ over the running prototypes of the active task & 0.5 & pulls each feature toward its own class prototype and away from the other 19 \\
+Top-32 memory repulsion & mean of $\mathrm{ReLU}(\cos(f, p) - 0.20)^2$ over the 32 closest past prototypes & 2.0 & keeps new-class features out of the regions old classes occupy on the sphere \\
+Attention reconstruction & MSE between $\mathrm{attention}(p, M)$ and $p$ for up to 128 random past prototypes $p$ & 1.0 & forces attention to return a prototype unchanged when queried with it, so retrieval stays faithful \\
+Gaussian prototype replay & CE over seen classes on $\mathrm{head}(\mathrm{fuse\_features}(p + \mathrm{noise}))$ for 256 stratified prototypes & 2.0 & teaches the head to separate old classes from new without any stored images \\
+Online EWC & $\tfrac{\lambda}{2}\sum F(\theta - \theta^*)^2$ & $\lambda = 5000$ (M4) or 0 (M3) & pins important weights of every module \\
+\bottomrule
+\end{tabularx}
+
+The total is the plain sum of the weighted terms:
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\mathrm{CE}} + \alpha_t \lambda_{\mathrm{dist}} \mathcal{L}_{\mathrm{dist}} + \alpha_t \lambda_{\mathrm{spat}} \mathcal{L}_{\mathrm{spat}} + \lambda_{\mathrm{proto}} \mathcal{L}_{\mathrm{proto}} + \lambda_{\mathrm{rep}} \mathcal{L}_{\mathrm{rep}} + \mathcal{L}_{\mathrm{recon}} + \lambda_{\mathrm{replay}} \mathcal{L}_{\mathrm{replay}} + \mathcal{L}_{\mathrm{EWC}}
+\end{equation}
+
+The individual formulas, for recall:
+\begin{equation}
+\mathcal{L}_{\mathrm{dist}} = \tfrac{1}{2}\big(1 - \cos(f, E_{t-1}(x))\big) + \tfrac{1}{2}\big(1 - \cos(f, E_0(x))\big)
+\end{equation}
+\begin{equation}
+\mathcal{L}_{\mathrm{spat}} = \frac{1}{|S|}\sum_{s \in \{f_3, f_4\}} \tfrac{1}{2}\Big[\big(1 - \langle \widehat{\bar{s}^{W}}, \widehat{\bar{s}^{W}_{\mathrm{old}}} \rangle\big) + \big(1 - \langle \widehat{\bar{s}^{H}}, \widehat{\bar{s}^{H}_{\mathrm{old}}} \rangle\big)\Big]
+\end{equation}
+\begin{equation}
+\mathcal{L}_{\mathrm{proto}} = -\log \frac{\exp(\hat{f}^{\top}\hat{p}_y / 0.20)}{\sum_{c=1}^{20} \exp(\hat{f}^{\top}\hat{p}_c / 0.20)}
+\end{equation}
+\begin{equation}
+\mathcal{L}_{\mathrm{rep}} = \frac{1}{B \cdot 32}\sum_{b}\sum_{p \in \mathrm{top32}(b)} \mathrm{ReLU}\big(\hat{f}_b^{\top}\hat{p} - 0.20\big)^2
+\end{equation}
+\begin{equation}
+\mathcal{L}_{\mathrm{replay}} = \mathrm{CE}\Big(\mathrm{head}\big(\mathrm{fuse}(\widehat{p + 0.5\sqrt{v}\,\epsilon})\big)[:, :\mathrm{seen}],\; y_p\Big), \quad \epsilon \sim \mathcal{N}(0, I)
+\end{equation}
+
+\textbf{Details worth being able to explain}:
+\begin{itemize}
+  \item Top-32 instead of all past prototypes (Job 73): repelling from 1{,}800 vectors at once on a 512-dimensional sphere produced gradients that cancelled, freezing Task 10 at 22.9\% accuracy. Thirty-two hard negatives gave clean gradients and doubled it.
+  \item Stratified replay budget of 256 (Job 73): replay cost no longer grows with the number of tasks, which cut 43 minutes off a run. Prototypes are sampled evenly per seen task; the active task contributes its running prototypes with a fixed small variance 0.01.
+  \item The replayed pseudo-features pass through \code{fuse\_features} under \code{no\_grad}, so replay trains only the head, not the attention or gate.
+  \item Mixed precision via \code{autocast} and \code{GradScaler}; the scheduler is stepped only when the scaler accepted the step.
+  \item Two accuracies are logged per epoch: TaskAcc (argmax within the 20 active logits) and SeenAcc (argmax among all seen logits), which shows how well the live batch already separates from old classes.
+  \item On Task 1 there is no old encoder, no past memory, and no Fisher, so only CE and InfoNCE are active.
+\end{itemize}
+
+% ===========================================================================
+\section{Step 10. Post-task pipeline}
+
+After the 50 epochs, \code{train\_task} runs six steps in a fixed order. Each consumes the previous one's output, so the order is part of the design.
+\begin{enumerate}
+  \item \textbf{Commit prototypes.} \code{memory\_bank.update\_memory} encodes the finished task's training set with the current encoder and stores 10 K-means prototypes and the variance for each of its 20 classes. The running prototypes are reset.
+  \item \textbf{Re-align every past task.} For each earlier committed task, the same \code{update\_memory} is re-run through the current encoder, overwriting its prototypes and variances. This is the fix for representation drift (Job 71): prototypes stored by $E_1$ are meaningless to $E_8$, so the memory is re-expressed in the current encoder's coordinates after every task. Because all images are cached in RAM this costs under 30 seconds per past task. The review-ready framing: the memory stores class identities, not frozen coordinates.
+  \item \textbf{Weight aligning.} \code{classifier.align\_weights} sets \code{task\_scale} to 1.0 for every seen class.
+  \item \textbf{Balanced classifier finetuning} (\code{\_balanced\_classifier\_finetune}, tasks 2 onward). Every prototype of every seen class is collected with its label and variance. Encoder, attention, and gate are frozen; only the cosine head trains, with \code{AdamW} at 0.005 and weight decay $10^{-4}$ under cosine annealing for 25 epochs. Each mini-batch of 64 prototypes is expanded by 5 Gaussian draws (prototype plus $0.5\sqrt{\mathrm{variance}}$ times noise, re-normalized), passed through \code{fuse\_features} without gradient, and scored by the head with \code{targets=None} so no margin distorts calibration. Cross-entropy over all seen classes. Because every class contributes the same number of prototypes, the head sees a perfectly balanced curriculum, which erases the recency bias left by 50 epochs of task-masked training. All \code{requires\_grad} flags are restored afterwards.
+  \item \textbf{Snapshot encoders.} After Task 1 only, a deep copy of the encoder becomes \code{base\_encoder} ($E_0$), the permanent anchor. After every task a deep copy becomes \code{old\_encoder} ($E_{t-1}$). Both are set to eval and frozen; they are the distillation targets in the next task.
+  \item \textbf{Update Online EWC} (M4 only). \code{ewc\_module.update} computes the new Fisher on the task's training loader (2{,}000 samples, seen-class log-likelihood), blends it into the running Fisher with $\gamma = 0.88$, and snapshots all weights as the new anchor.
+\end{enumerate}
+
+\textbf{Why this order}: Fisher is computed last so the anchor includes the finetuned head; finetuning comes after re-alignment so it trains on prototypes in the current coordinate system; snapshots come after finetuning so the next task distills toward the calibrated model.
+
+Then \code{main.py} calls \code{evaluate\_all\_tasks} (Step 11), which also writes the checkpoint.
+
+% ===========================================================================
+\section{Step 11. Evaluation, checkpoints, and resume}
+
+\code{MAVISTrainer.evaluate\_all\_tasks} scores every validation set seen so far with four different predictors, records eight accuracy matrices, and writes the checkpoint. The predictors all start from one forward pass with \code{task\_id=None} (retrieve from all memory), which returns logits, the raw feature $f$, and the fused feature.
+
+\textbf{Predictor 1, aligned linear head.} \code{logits[:, :seen]}, argmax. Top-5 is also counted. This is the parametric view.
+
+\textbf{Predictor 2, multi-prototype NCM.} \code{compute\_ncm\_scores(f)} gives a cosine score per seen class (max over its 10 prototypes), argmax. This is the non-parametric view and needs no trained head. It is scored on the raw feature $f$, in prototype space, not the fused feature.
+
+\textbf{Predictor 3, probability-calibrated dynamic ensemble.} Both score vectors are converted to probability distributions with their own temperatures, then blended per class with a weight that depends on how old the class's task is:
+\begin{equation}
+P_{\mathrm{head}} = \mathrm{softmax}(z / 0.90), \qquad P_{\mathrm{ncm}} = \mathrm{softmax}(s_{\mathrm{NCM}} / 0.05)
+\end{equation}
+\begin{equation}
+\alpha_c = \sigma\!\left(\frac{\Delta_c - 1}{0.70}\right), \quad \Delta_c = t_{\mathrm{now}} - \mathrm{task}(c), \qquad P_{\mathrm{ens}} = \mathrm{normalize}\big((1-\alpha) P_{\mathrm{head}} + \alpha P_{\mathrm{ncm}}\big)
+\end{equation}
+For the newest task $\alpha$ is about 0.19 (trust the head), for a task one step old 0.50, for two or more steps old about 0.81 (trust memory). The head knows recent classes best; the memory remembers old ones best. Job 70 showed why calibration to probabilities is required: blending raw logits let NCM scores scaled by 24 overwhelm the head, dropping Tasks 8 to 10 to 0.5\%.
+
+\textbf{Predictor 4, Bayesian hierarchical routing.} Two signals estimate which task the image belongs to, then the class is chosen within that task mixture:
+\begin{equation}
+P_{\mathrm{marg}}(k) = \sum_{c \in \mathrm{task}\,k} P_{\mathrm{ens}}(c), \qquad P_{\mathrm{aff}}(k) = \mathrm{softmax}_k\!\Big(\tfrac{1}{0.18}\,\mathrm{mean\,top3}_{c \in k}\, s_{\mathrm{NCM}}(c)\Big)
+\end{equation}
+\begin{equation}
+w_k = 0.5\, P_{\mathrm{marg}}(k) + 0.5\, P_{\mathrm{aff}}(k), \qquad P_{\mathrm{hier}}(c) = w_{k(c)} \cdot \frac{P_{\mathrm{ens}}(c)}{P_{\mathrm{marg}}(k(c))}
+\end{equation}
+The marginal task probability is the law of total probability applied to the ensemble. The affinity is the memory bank's geometric opinion from the three closest prototypes of each task. The final score multiplies the task weight by the exact conditional probability of the class within its task. This is Bayes' rule, $P(c) = P(\mathrm{task})\,P(c \mid \mathrm{task})$, and the division is where the Job 74 fix lives: an earlier version applied a second softmax to $P_{\mathrm{ens}}$ inside each task, which exponentiated numbers already in $[0, 1]$ and squashed a 170-to-1 confidence ratio to 2.3-to-1. Replacing it with division raised hierarchical top-5 from 31.73\% to 49.26\%. \code{tests/test\_hierarchical\_bayes.py} checks that the scores sum to 1 and that with $w = P_{\mathrm{marg}}$ the hierarchy reproduces $P_{\mathrm{ens}}$ exactly. Routing accuracy, the argmax of $w$ against the true task, is logged separately. There is no trainable task router; a learned one was added in Job 71, collapsed from recency bias, and was removed in Job 73.
+
+\textbf{Matrices.} Eight lists of per-task accuracy rows are kept: head, NCM, ensemble, hierarchical at top-1, and ensemble, head, hierarchical at top-5. \code{accuracy\_matrix} mirrors the hierarchical top-1 matrix. \code{compute\_forgetting(matrix)} runs the standard formula on any of them, and \code{main.py} prints all forgetting values after every task.
+
+\textbf{Checkpoints.} Every evaluation writes \code{mavis\_task\_\{t\}.pth} (full model state including memory buffers), \code{mavis\_ewc\_task\_\{t\}.pth} when EWC is on, and one \code{accuracy\_matrix*.json} per matrix, into \code{results/checkpoints/mavis} or \code{mavis\_m3}. At the end of the run \code{main.py} writes \code{results/raw/mavis\_results.json} (or \code{mavis\_m3\_results.json}) with every matrix and forgetting value, which is what \code{experiments/benchmark.py} reads to print the M1 to M4 table.
+
+\textbf{Resume.} \code{train\_mavis} looks for the highest \code{mavis\_task\_\{t\}.pth}, loads it with \code{strict=False}, rebuilds \code{old\_encoder} from it and \code{base\_encoder} from \code{mavis\_task\_1.pth}, truncates every matrix to $t$ rows, and loads the EWC state. Training continues at task $t$. If all 10 tasks are complete the directory is copied to a timestamped archive, emptied, and a fresh run starts. \code{--fresh} skips all of this and deletes. The checkpoint directory is gitignored, so resume state is local to the machine that trained.
+
+% ===========================================================================
+\section{Experiment chronology}
+
+The project moved through five phases and about fifteen cluster jobs between September and October 2026. Rows run oldest first so the reasoning chain reads forward; every number is from \code{PROJECT\_LOG.md} or \code{results/raw/}.
+
+\begin{longtable}{L{1.5cm} L{2.2cm} L{6.2cm} L{5.1cm}}
+\toprule
+When & Phase or job & What changed & What it did \\
+\midrule
+\endfirsthead
+\toprule
+When & Phase or job & What changed & What it did \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Sep 2026 & Phase 1 & TensorFlow 2.10 on an RTX 4050 laptop (6 GB) hit OOM and 14-hour runs; rewrote everything in PyTorch with AMP; moved to a SLURM node with an RTX 6000 Ada (48 GB); Python 3.14 broke Triton and multi-worker loaders, so Triton was disabled, attention hand-rolled in FP32, and images cached in RAM with \code{num\_workers=0} & a working, resumable pipeline \\
+Oct 2026 & Phase 2, M1 & baseline CNN, unmasked 200-way cross-entropy & about 75\% per task when new, Task 1 to 0\% by the end; 12.62\% final top-1, 64.76\% forgetting \\
+Oct 2026 & Phase 3, M2 & Online EWC on the baseline, $\lambda = 50{,}000$, $\gamma = 0.95$ & 13.16\% top-1, 65.39\% forgetting; parameter springs alone do not hold a 200-way head \\
+Oct 2026 & Phase 4 build, M3 & memory bank ($K{=}3$ K-means), multi-head attention, gated fusion, PODNet spatial distillation, Weight Aligning, prototype alignment loss & the representation-level machinery exists \\
+Oct 2026 & Job 53 & diagnostics & training accuracy 93\% to 99.7\% (plasticity solved); WA ratio stuck at 1.0 on cosine weights; one-step distillation let drift accumulate \\
+Oct 2026 & Phase 4 retention & Task-1 base anchor $E_0$ for distillation, memory repulsion loss, calibrated WA, canonical NCM and ensemble evaluation & drift bounded; three predictors reported \\
+Oct 2026 & Jobs 59 to 61 & 30 epochs, $K{=}5$, Gaussian covariance replay, temperature-sharpened attention, Bayesian soft routing & ensemble 24.55\% mean; head forgetting down to 24.24\%; Task 1 retention 53.8\% \\
+Oct 2026 & Job 62 & 50 epochs, progressive distillation ramp, refined OneCycleLR & training accuracy plateaued near 70\% to 75\%; fixed by cosine scale 24, InfoNCE temperature 0.20, label smoothing 0.02, gate clamp $[0.05, 0.95]$ \\
+Oct 2026 & Phase 5 integration, M4 & Online EWC added to MAVIS at $\lambda = 2{,}000$ with Fisher masked to seen classes; EWC state checkpointing; \code{--no-ewc} and \code{--ewc-lambda} flags & the full model exists \\
+Oct 2026 & Job 64 & first full M4 run & head accuracy 0.00\% on Tasks 1 to 7; three root causes: unmasked CE sends negative gradient to old classes for 450 epochs, stored prototypes drift from the moving encoder, EWC at 2.8\% of the loss does nothing \\
+Oct 2026 & Job 66 & task-masked CE plus Gaussian replay, post-task balanced head finetune (5 epochs SGD), prototype re-alignment, $\lambda = 5{,}000$, backbone LR 0.10, distillation 5.0 and 3.0 & head forgetting 66.84\% to 5.21\%; Task 1 head 46.3\%; ensemble mean 21.68\% \\
+Oct 2026 & Job 67 & backbone LR 0.20, distillation 3.0 and 1.5, 25-epoch AdamW finetune with 10 draws, $K{=}7$, cosine margin 0.20, top-5 metrics & ensemble 24.54\% top-1 and 53.11\% top-5; then fixes: \code{targets=None} in finetune, \code{fuse\_features} harmonization, task-adaptive backbone LR, top-3 routing, 2{,}000 Fisher samples \\
+Oct 2026 & between jobs & Squeeze-and-Excitation in the backbone, recency-aware ensemble weights, $K{=}10$ & memory coverage up 43\% \\
+Oct 2026 & Job 69 & run & CUDA OOM at Task 7 from the $[B, N, 512]$ attention tensor; fixed with 64-query chunking and 64-prototype finetune batches \\
+Oct 17 & Job 70 & first complete 10-task run, 4h 34m & ensemble forgetting 2.00\%, but Tasks 8 to 10 ensemble fell to 0.5\% because NCM scores scaled by 24 swamped head logits; head mean 22.61\% \\
+Oct 17 & Job 71 & probability-calibrated ensemble (softmax with temperatures 1.2 and 0.05), a learned task-router head, hybrid routing & Task 10 ensemble 53.2\% (from 0.5\%); the router routed 100\% to the newest task and 0\% to old ones, a textbook recency bias \\
+Oct 17 & Job 72 & router loss removed from live batches; task probability from the law of total probability over the ensemble, 50/50 with prototype affinity & routing uniform at 22\% to 32\% across tasks; 23.98\% top-1, 49.00\% top-5; head forgetting 13.44\% \\
+Oct 17--18 & Job 73 & top-32 hard-negative repulsion, 256-prototype stratified replay, router deleted, $\gamma = 0.88$, head temperature 0.90 & Task 10 accuracy 22.9\% to 51.6\%; run time 4h 33m to 3h 50m; but hierarchical top-5 only 31.73\% \\
+Oct 18 & audit & found a second softmax inside the hierarchical predictor compressing confidence 170:1 to 2.3:1; replaced with Bayes division; synced $\gamma = 0.88$ everywhere; added \code{evaluation/metrics.py}, \code{evaluation/visualize.py}, \code{experiments/benchmark.py} & publication-ready code \\
+Oct 18 & Job 74, final M4 & audit fixes, 3h 51m & hierarchical 22.24\% top-1 and 49.26\% top-5 (from 31.73\%); NCM forgetting 12.50\%; Task 1 top-5 57.9\% \\
+Oct 19 & Job 75, M3 ablation & \code{--no-ewc --fresh}, 3h 44m & hierarchical 17.38\% top-1, 48.78\% top-5; NCM forgetting 14.96\%; head forgetting 59.08\%; completes the $2 \times 2$ \\
+\end{longtable}
+
+The through-line to present: every job produced one diagnosis with a mathematical cause (negative gradients, representation drift, logit scale disparity, recency-biased router, gradient cancellation on the sphere, double softmax) and one targeted fix, and each fix is still in the code.
+
+% ===========================================================================
+\section{Final results and the synergy argument}
+
+The full model nearly doubles the baseline's final accuracy and cuts memory-level forgetting five-fold. All four cells of the factorial were run on the same class order, the same 50-epoch schedule, and the same hardware (Jobs 74 and 75 for M4 and M3).
+
+\begin{tabularx}{\textwidth}{L{2.4cm} Y L{1.5cm} L{2.3cm} L{1.8cm} Y L{1.5cm}}
+\toprule
+Model & Regularization & Memory & Final top-1 & Final top-5 & Forgetting (head or hier.) & NCM forgetting \\
+\midrule
+M1 Baseline CNN & none & none & 12.62\% & about 27\% & 64.76\% & n/a \\
+M2 CNN + EWC & EWC, $\lambda = 50{,}000$ & none & 13.16\% & about 28.5\% & 65.39\% & n/a \\
+M3 Memory only & none & $K{=}10$ bank & 17.38\% (hier.), 16.42\% (ens.) & 48.78\% (hier.) & 51.29\% (hier.), 59.08\% (head) & 14.96\% \\
+M4 Full MAVIS, ensemble & EWC, $\lambda = 5{,}000$, $\gamma = 0.88$ & $K{=}10$ bank & 22.04\% & 49.47\% & 34.60\% & 12.50\% \\
+M4 Full MAVIS, hierarchical & EWC, $\lambda = 5{,}000$, $\gamma = 0.88$ & $K{=}10$ bank & \textbf{22.24\%} & \textbf{49.26\%} & \textbf{33.90\%} & \textbf{12.50\%} \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Per-task picture for M4 (Job 74, hierarchical)}: Task 1 keeps 24.3\% top-1 and 57.9\% top-5 after 450 further epochs and 180 new classes; Task 10 reaches 52.3\% top-1 and 65.8\% top-5. Task routing accuracy is 29.4\% on average, about three times chance.
+
+\textbf{Super-additive synergy}, the headline claim. Measured as top-1 gain over M1:
+\begin{itemize}
+  \item EWC alone (M2): $+0.54$ points
+  \item Memory alone (M3): $+4.76$ points
+  \item Both (M4): $+9.62$ points
+\end{itemize}
+The sum of the single effects is 5.30 points, so the joint effect is 1.8 times larger than additive. The mechanism, visible in the per-predictor numbers: without EWC (M3) the non-parametric memory still holds (NCM forgetting 14.96\%) but the parametric head is overwritten (head forgetting 59.08\%, Tasks 1 to 4 head accuracy under 6\%). With EWC the head's weights are pinned (head forgetting falls by 25 points), so the head and the memory agree, and the ensemble and hierarchical predictors can combine two good opinions instead of one good and one wrecked one. EWC protects the parameters that make the memory's coordinates meaningful; the memory gives the head balanced replay. Each covers the other's failure mode.
+
+\textbf{Other defensible claims}: no pretrained weights, no stored images (2{,}000 vectors plus 200 variances), zero trainable parameters in the task router, and every metric reported in both top-1 and top-5.
+
+% ===========================================================================
+\section{Hyperparameter compendium}
+
+Every default that the final M4 run (Job 74) used, grouped by where it lives. Values marked ``in code'' are hard-coded in the trainer or model rather than in \code{config.py}.
+
+\begin{longtable}{L{2cm} L{5.2cm} L{4.4cm} L{3.4cm}}
+\toprule
+Group & Name & Value & Where \\
+\midrule
+\endfirsthead
+\toprule
+Group & Name & Value & Where \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Data & image size, classes, tasks, classes per task, seed & 64, 200, 10, 20, 42 & \code{DatasetConfig} \\
+Data & batch size & 128 & \code{TrainingConfig} \\
+Augmentation & crop padding, flip, rotation, color jitter, erasing probability, erasing scale & 4, on, 10 degrees, 0.2 (hue 0.1), 0.25, 0.02 to 0.20 & \code{AugmentationConfig}, \code{augmentation.py} \\
+Training & epochs per task & 50 & \code{TrainingConfig} \\
+Training & learning rate, weight decay & 0.008, $10^{-2}$ & config, in code \\
+Training & backbone LR factor for tasks 2+ & 0.20 decaying by 0.007 per task to a floor of 0.15 & config, in code \\
+Training & OneCycleLR pct\_start, div\_factor, final\_div\_factor & 0.15, 10, 100 & in code \\
+Training & label smoothing & 0.02 (MAVIS), 0.1 (baseline) & config, in code \\
+Training & mixed precision & on (FP16 autocast, FP32 attention) & config \\
+Loss & distill\_lambda, spatial\_distill\_lambda & 3.0, 1.5, both ramped 0.5 to 1.0 over 5 epochs & config \\
+Loss & proto\_lambda, InfoNCE temperature & 0.5, 0.20 & config, in code \\
+Loss & repel\_lambda, margin, top-$K$ & 2.0, 0.20, 32 & config, in code \\
+Loss & reconstruction weight, sample size & 1.0, 128 & in code \\
+Loss & proto\_replay\_lambda, replay budget, noise scale, live-task variance & 2.0, 256, $0.5\sqrt{\mathrm{var}}$, 0.01 & config, in code \\
+EWC & enabled, ewc\_lambda, fisher\_samples, gamma & true, 5000, 2000, 0.88 & \code{EWCConfig} \\
+Encoder & feature\_dim, dropout\_rate, GroupNorm groups, SE reduction & 512, 0.5, 32, 16 & \code{EncoderConfig}, in code \\
+Encoder & stage channels & 128, 128, 256, 512, 1024 & in code (config \code{channels} is unused) \\
+Classifier & scale, margin & 24.0, 0.20 & in code, \code{ClassifierConfig} \\
+Memory & prototypes\_per\_class, capacity, K-means iterations, EMA momentum & 10, 2000, 10, 0.92 / 0.08 & \code{MemoryConfig}, in code \\
+Attention & heads, embed dim, temperature, dropout, chunk size & 4, 512, 0.5, 0.1, 64 & \code{AttentionConfig}, in code \\
+Fusion & gate range & 0.05 to 0.95, zero-initialized & in code \\
+Finetune & proto\_finetune\_epochs, proto\_finetune\_draws, LR, weight decay, batch & 25, 5, 0.005, $10^{-4}$, 64 & config, in code \\
+Evaluation & head temperature, NCM temperature, ensemble alpha, affinity temperature, top-$K$ for affinity, routing mix & 0.90, 0.05, $\sigma((\Delta - 1)/0.70)$, 0.18, 3, 0.5 / 0.5 & in code \\
+Baseline EWC (M2 as logged) & ewc\_lambda, fisher\_samples, gamma & 50000, 1000, 0.95 & CLI override, class default \\
+\end{longtable}
+
+The logged runs used the \code{config.py} defaults, not the YAML files, so the dataclass is the authoritative record.
+
+% ===========================================================================
+\section{Glossary and likely reviewer questions}
+
+\textbf{Terms as they are used in this project}:
+
+\begin{longtable}{L{4.6cm} L{11.4cm}}
+\toprule
+Term & Meaning here \\
+\midrule
+\endfirsthead
+\toprule
+Term & Meaning here \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Class-incremental learning (CIL) & tasks arrive sequentially; test-time prediction is over all seen classes with no task id \\
+Catastrophic forgetting & loss of old-task accuracy caused by training on new tasks \\
+Stability vs plasticity & retaining old knowledge vs absorbing new knowledge \\
+Accuracy matrix $R$ & $R_{i,j}$ = accuracy on task $j$ after training task $i$ \\
+ACC, $F$, BWT, LA & final average accuracy, average forgetting, backward transfer, learning accuracy \\
+Prototype & a unit-norm 512-d vector representing a class mode; 10 per class via K-means \\
+Memory bank & buffer of prototypes and class variances; non-parametric, no gradient \\
+NCM & nearest class mean: cosine to prototypes, max over the $K$ of each class \\
+Running prototype & EMA class mean of the active task during training \\
+Re-alignment & re-encoding every past task's prototypes with the current encoder after each task \\
+Representation drift & mismatch between prototypes stored by an old encoder and features from the current one \\
+$E_0$, $E_{t-1}$ & frozen encoder snapshots after Task 1 and after the previous task; distillation targets \\
+Feature distillation & $1 - \cos$ between current and snapshot features \\
+PODNet spatial distillation & cosine match of width-pooled and height-pooled intermediate feature maps \\
+InfoNCE & contrastive cross-entropy over similarities to prototypes at temperature 0.20 \\
+Hard-negative repulsion & penalty on similarity to the 32 closest past prototypes above margin 0.20 \\
+Gaussian covariance replay & pseudo-features sampled around prototypes using stored per-dimension variance \\
+Task-masked cross-entropy & CE computed only over the 20 active logits \\
+Balanced classifier finetuning & post-task head-only training on equal numbers of pseudo-features per seen class \\
+Weight Aligning (WA) & per-class temperature buffer set to 1 for seen classes \\
+Cosine linear, additive margin & normalized-weight head scaled by 24; true-class cosine reduced by 0.20 in training \\
+Gated fusion & per-dimension sigmoid blend of live and retrieved features, clamped to $[0.05, 0.95]$ \\
+Temperature-sharpened attention & attention logits divided by 0.5 so retrieval is peaked \\
+No-memory embedding & learned vector returned when the memory bank is empty (Task 1) \\
+Fisher information & expected squared gradient of the log-likelihood; diagonal only \\
+Online EWC & one running Fisher decayed by $\gamma$ per task, one weight anchor \\
+Dynamic ensemble & per-class blend of calibrated head and NCM probabilities weighted by task age \\
+Bayesian hierarchical routing & $P(c) = P(\mathrm{task}) \times P(c \mid \mathrm{task})$, with $P(\mathrm{task})$ from the ensemble marginal and prototype affinity \\
+Double-softmax bug & applying softmax to values already in $[0, 1]$, which crushes confidence ratios \\
+$2 \times 2$ factorial & M1 to M4 crossing EWC on/off with memory on/off \\
+Super-additive & joint gain exceeds the sum of single gains (9.62 vs 5.30 points) \\
+\end{longtable}
+
+\textbf{Questions a reviewer is likely to ask, with the short answer}:
+\begin{enumerate}
+  \item Why not store exemplar images like iCaRL? The research question fixes a memory budget; 2{,}000 vectors plus variances is a few megabytes and Gaussian replay reconstructs class clouds from them. No raw images are retained.
+  \item Isn't re-encoding past training data after each task a form of rehearsal? The images are read once to rebuild prototypes; no gradient flows from them, and only the training split is used. It is prototype maintenance, not training on old data. This is the point most worth being ready to defend.
+  \item Why GroupNorm? BatchNorm running statistics drift to the newest task and corrupt old-class features; GroupNorm has no cross-batch state.
+  \item Why cosine classification? Equal weight norms remove recency bias from weight magnitude and protect old rows from decoupled weight decay.
+  \item Why is EWC $\lambda$ 5{,}000 here but 50{,}000 in M2? In M4 the distillation terms already restrain the encoder; 5{,}000 puts EWC at 10\% to 12\% of the gradient, 50{,}000 would freeze the network.
+  \item Why $\gamma = 0.88$? With $\gamma = 0.95$ nine stacked Fishers froze late tasks (Task 10 at 22.9\%); 0.88 weights Task 1 at 0.32 by Task 10 and let Task 10 reach 51.6\%.
+  \item Why only the 32 nearest prototypes in the repulsion loss? Repelling from all 1{,}800 produced cancelling gradients on the unit sphere; 32 hard negatives give a clean direction.
+  \item Why four predictors? Head and NCM fail in opposite places (new vs old tasks). The ensemble blends them by task age; the hierarchical predictor adds a task prior and gave the best top-1.
+  \item How is leakage prevented? Prototypes come from training data; training retrieval sees only past tasks plus the running prototypes of the active task; evaluation masks logits to seen classes only.
+  \item What is the compute cost? About 3h 50m for 10 tasks on an RTX 6000 Ada, bounded by 64-query attention chunks and a 256-prototype replay budget that does not grow with task count.
+  \item What would you do next? Report mean and standard deviation over several seeds (every result is one run), run the lambda and head sweeps already defined in the config, and test on a second benchmark such as CIFAR-100.
+\end{enumerate}
+
+% ===========================================================================
+\section{Where everything else lives}
+
+Files that are not on the method path but a reviewer may ask about.
+
+\begin{tabularx}{\textwidth}{L{5.6cm} Y L{3.2cm}}
+\toprule
+File & Purpose & Status \\
+\midrule
+\code{evaluation/metrics.py} & standalone ACC, F, BWT, LA from any accuracy matrix & used by \code{experiments/benchmark.py} \\
+\code{evaluation/visualize.py} & task sample grid and the average-accuracy-per-task curve (\code{results/figures/}) & used by \code{main.py visualize} \\
+\code{experiments/benchmark.py} & prints the M1 to M4 markdown table from \code{results/raw/*.json} & run directly \\
+\code{tests/test\_hierarchical\_bayes.py} & checks the Bayes routing identity and that scores sum to 1 & run directly, no pytest \\
+\code{tests/test\_gpu\_speed.py} & CPU vs GPU matmul timing sanity check & run directly \\
+\code{scripts/run\_phase5.sh}, \code{scripts/run\_phase5\_m3\_ablation.sh} & SLURM job scripts for M4 and M3 on the cluster, with cluster-specific paths and compiler exports & HPC only \\
+\code{scripts/generate\_chronicle\_pdf.py} & converts a chronicle markdown to PDF via headless Chrome & stale: its input file no longer exists \\
+\code{docs/MAVIS\_MASTER\_ARCHITECTURAL\_TREATISE.md} and \code{.tex} & long-form theory, chronology, and student-perspective explanations & reference \\
+\code{docs/MAVIS\_WHITEBOARD\_BLUEPRINT.md} & six-zone whiteboard layout of the architecture with dimension flow & reference \\
+\code{docs/references/} & the EWC paper (Kirkpatrick et al., 2017) and the original implementation spec & reference \\
+\code{PROJECT\_LOG.md} & the chronological decision and results log, source of every number in this walkthrough & living record \\
+\code{results/raw/environment.json} & hardware record from the original TensorFlow era (RTX 4050) & historical \\
+\code{CLAUDE.md} & guidance file for Claude Code sessions in this repository & tooling \\
+\bottomrule
+\end{tabularx}
+
+\end{document}

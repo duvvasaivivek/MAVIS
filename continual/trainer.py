@@ -31,7 +31,7 @@ class ContinualTrainer:
     """
 
     def __init__(self, model, loader, task_gen, learning_rate, epochs_per_task,
-                 checkpoint_dir, device=None, ewc_lambda=0.0, fisher_samples=1000):
+                 checkpoint_dir, device=None, ewc_lambda=0.0, fisher_samples=1000, gamma=0.95):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -50,7 +50,8 @@ class ContinualTrainer:
         self.accuracy_matrix = []
 
         # EWC state: online EWC module
-        self.ewc_module = OnlineEWC(model=self.model, ewc_lambda=self.ewc_lambda) if self.ewc_lambda > 0 else None
+        self.gamma = gamma
+        self.ewc_module = OnlineEWC(model=self.model, ewc_lambda=self.ewc_lambda, gamma=gamma) if self.ewc_lambda > 0 else None
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -137,6 +138,10 @@ class ContinualTrainer:
         self.model.eval()
         task_accuracies = []
         print(f"\n[Eval] Testing all tasks up to {current_task_id + 1}...")
+        # Standard CIL evaluation: predict among the classes seen so far. The MAVIS trainer masks to
+        # seen classes; before 2026-10-25 this trainer took the argmax over all 200 logits, including
+        # classes never trained, which is not comparable. Masking is applied here for parity.
+        seen_classes = (current_task_id + 1) * self.task_gen.classes_per_task
 
         with torch.no_grad():
             for t in range(current_task_id + 1):
@@ -146,14 +151,14 @@ class ContinualTrainer:
 
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
-                    
+
                     # Offset targets to absolute class indices
                     start_cls = t * self.task_gen.classes_per_task
                     targets = targets + start_cls
-                    
+
                     with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
                         outputs = self.model(inputs)
-                    _, predicted = outputs.max(1)
+                    _, predicted = outputs[:, :seen_classes].max(1)
                     total += targets.size(0)
                     correct += predicted.eq(targets).sum().item()
 

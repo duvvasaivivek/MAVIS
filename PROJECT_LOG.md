@@ -559,3 +559,79 @@ where:
 | **Overall Mean** | **12.17%** | **40.45%** | **16.42%** | **48.56%** | **22.81%** | **22.70%** | **17.38%** | **48.78%** |
 
 
+
+---
+
+## 2026-10-25 — Full-codebase review: three performance bugs found, two valid baseline cells measured
+
+Full record: `docs/REVIEW_LOG_2026-10-25.md`. Nothing was fixed and nothing was committed.
+
+**Three performance bugs, each traced to a line and measured.**
+
+- **A. Gaussian prototype replay is training on noise.** Prototypes are stored as unit vectors
+  (`models/memory.py:43`) but their variances are measured on raw features of length ~22.6
+  (`models/memory.py:126`). The replay noise therefore has length 9.35 against a prototype of
+  length 1.00. Cosine between a draw and its own prototype is 0.1019, and a nearest-prototype
+  oracle scores 2.67% on the draws against 1.67% chance; rescaled into the prototypes' own
+  space the same oracle scores 97.83%. The replay loss sits at 3.9856 where guessing is 4.0943,
+  and at weight 2.0 contributes ~7.97 of a ~17.09 total loss. This is why the balanced head
+  finetune tops out at 5.30%.
+- **B. The attention reconstruction loss switches off the memory path.** Its target has length
+  1.0, its prediction leaves a LayerNorm at length 22.63, and the loss is 193x cheaper once the
+  gain shrinks. The gain duly falls 0.9045 -> 0.6164 -> 0.4413 across tasks 1 to 3, and the
+  retrieved feature reaches the fusion gate at 1.76% of the fused vector while the gate is
+  opening towards memory.
+- **C. MAVIS trains with channel dropout 0.5, the baseline with none** (`models/mavis.py:53` vs
+  `models/baseline.py:22`). Measured train-vs-eval feature change 0.140 on trained weights. Small
+  in size, but it confounds every M3/M4 against M1/M2 comparison.
+
+Secondary: weight aligning is a no-op (`models/classifier.py:66`); the learned no-memory
+embedding never trains (length 0.220, its init, in all checkpoints); the EWC strength scales
+with batch size because the Fisher uses batch-mean gradients; prototype variances include
+augmentation jitter; K is 10 in code and 3 or 7 in the docs.
+
+**First valid M1/M2 cells** (correct label offsets, seen-class masking; width 32, 5 tasks,
+10 epochs, seed 1):
+
+| Cell | Final row | ACC | Forgetting |
+|---|---|---|---|
+| M1 baseline | 0.0, 0.0, 0.0, 0.0, 64.9 | 12.98% | 50.20% |
+| M2 EWC (lambda 5000) | 0.0, 0.0, 0.0, 0.2, 54.6 | 10.96% | 48.22% |
+
+EWC is 2.02 points below the baseline, one seed, point estimate only. The whole gap is the task
+being learned (64.9 vs 54.6); past-task accuracy is 0.0 either way. Note the strength was 5000,
+not the 50000 the published M2 used.
+
+The five-cell factorial was stopped by the harness for host memory after M1 and M2 seed 1;
+M3 seed 1 reached task 4. Seed-to-seed spread is still unmeasured.
+
+**Retraining:** at default flags the architecture is unchanged (45.53M / 45.63M / 47.21M) and the
+published M3/M4 files stand. Fixing A, B or C changes the model and would require re-running them.
+
+### 2026-10-25, later — the three performance bugs were fixed
+
+Details in `docs/REVIEW_LOG_2026-10-25.md`, Part 1b. Four code changes, each verified and each
+now guarded by a test. Still not committed.
+
+| Fix | Change | Verified by |
+|---|---|---|
+| A | `models/memory.py` measures class variance on normalised features, matching the space the prototypes live in | 10,000 real task-1 images: nearest-prototype oracle on replay draws goes 10.50% -> 99.50%, cosine 0.1276 -> 0.9371, noise length 9.09 -> 0.38 |
+| A2 | `continual/mavis_trainer.py` takes the live task's placeholder variance from the past classes instead of a hard-coded 0.01 | noise was length 1.13 against a unit prototype |
+| B | `continual/mavis_trainer.py` normalises the attention output before the reconstruction MSE | the old loss falls 1.0028 -> 0.0045 as the LayerNorm gain collapses 1.00 -> 0.05; the new loss is 0.003945 at every gain |
+| B2 | `models/mavis.py` rescales unit-norm replay queries to the live feature length inside `fuse_features` | without it, a restored retrieval branch of length 22.6 would swamp a query of length 1.0 |
+| C | channel dropout defaults to 0.0 and is wired into both models from one config field (`config.py`, `configs/*.yaml`, `models/baseline.py`, `main.py`) | MAVIS used 0.5 and the baseline 0.0, confounding every M3/M4 vs M1/M2 comparison |
+
+`tests/test_review_sanity.py` now has nine checks, all passing: 7 guards the replay noise scale,
+8 guards the gain-invariance of the reconstruction loss, 9 guards the dropout symmetry.
+
+End-to-end, two tasks at width 32: the retrieved branch is back to 68.3% of the fused vector
+where it was 2.36% before, with retrieved and live lengths comparable at 25.78 and 24.28.
+
+**All four published result files now need re-running.** M3 and M4 because the fixes change how
+MAVIS trains; M1 and M2 because of the pre-existing label bug and now also the dropout change.
+Correction: fix C changes MAVIS only. The baseline was already training at 0.0, because the old
+code passed no dropout and the encoder default is 0.0; fix C takes the 0.5 away from MAVIS and
+makes the shared setting explicit. Direction of the result is still not predictable: the gain
+collapse fix B prevents may have been the optimiser correctly switching off a retrieval path that
+does not help, and 0.0 vs 0.5 dropout on a 45.5M-parameter encoder seeing 10,000 images per task
+is an empirical question, not a known improvement.

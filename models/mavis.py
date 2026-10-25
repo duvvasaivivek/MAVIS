@@ -42,6 +42,7 @@ class MAVIS(nn.Module):
     def __init__(self, config):
         super().__init__()
         feature_dim = config.encoder.feature_dim
+        self.feature_dim = feature_dim
         num_tasks = config.dataset.num_tasks
         classes_per_task = config.dataset.classes_per_task
         total_classes = config.dataset.num_classes
@@ -49,7 +50,16 @@ class MAVIS(nn.Module):
         dropout_rate = config.encoder.dropout_rate
 
         # 1. Encoder (same Wide ResNet-18 used in Phases 2 & 3)
-        self.encoder = CNNEncoder(feature_dim=feature_dim, dropout_rate=dropout_rate)
+        base_width = getattr(config.encoder, "base_width", 128)
+        self.encoder = CNNEncoder(feature_dim=feature_dim, dropout_rate=dropout_rate, base_width=base_width)
+
+        # Ablation switch: when False, the attention retrieval and gated fusion are bypassed and the
+        # classifier sees the raw encoder feature. Everything else (memory bank, replay, NCM,
+        # re-alignment, distillation, EWC) is unchanged. Used to measure what the forward-pass
+        # memory path itself contributes.
+        self.use_attention = bool(getattr(config.attention, "enabled", True))
+        # Per-forward diagnostics (mean L2 norm of live feature, retrieved feature, mean gate value).
+        self.last_norms = None
 
         # 2. Memory Bank (frozen multi-prototype storage — NOT trained)
         prototypes_per_class = getattr(config.memory, "prototypes_per_class", 3)
@@ -106,14 +116,32 @@ class MAVIS(nn.Module):
             # EVALUATION: retrieve from all locked populated memories
             memories = self.memory_bank.get_all_populated_memories()
 
-        retrieved_features = self.attention(current_features, memories)
+        if self.use_attention:
+            retrieved_features = self.attention(current_features, memories)
 
-        # 3. Gated Fusion
-        # Clamped gate (0.05 .. 0.95) allows high fidelity feature routing while preserving memory retrieval
-        concat = torch.cat([current_features, retrieved_features], dim=1)  # [B, 2*D]
-        raw_gate = self.fusion_gate(concat)  # [B, D], values in (0, 1)
-        gate = 0.05 + 0.90 * raw_gate
-        fused_features = gate * current_features + (1.0 - gate) * retrieved_features
+            # 3. Gated Fusion
+            # Clamped gate (0.05 .. 0.95) allows high fidelity feature routing while preserving memory retrieval
+            concat = torch.cat([current_features, retrieved_features], dim=1)  # [B, 2*D]
+            raw_gate = self.fusion_gate(concat)  # [B, D], values in (0, 1)
+            gate = 0.05 + 0.90 * raw_gate
+            fused_features = gate * current_features + (1.0 - gate) * retrieved_features
+            with torch.no_grad():
+                self.last_norms = {
+                    "f_norm": current_features.float().norm(dim=1).mean().item(),
+                    "r_norm": retrieved_features.float().norm(dim=1).mean().item(),
+                    "gate_mean": gate.float().mean().item(),
+                    # share of the fused vector's squared norm that comes from the retrieved branch
+                    "r_share": ((1.0 - gate) * retrieved_features).float().norm(dim=1).pow(2).mean().item()
+                               / max(fused_features.float().norm(dim=1).pow(2).mean().item(), 1e-12),
+                }
+        else:
+            # Ablation: no memory path in the forward pass.
+            fused_features = current_features
+            with torch.no_grad():
+                self.last_norms = {
+                    "f_norm": current_features.float().norm(dim=1).mean().item(),
+                    "r_norm": 0.0, "gate_mean": 1.0, "r_share": 0.0,
+                }
 
         # 4. Classify from fused features (targets passed for cosine margin when training)
         logits = self.classifier(fused_features, targets=targets)
@@ -130,8 +158,20 @@ class MAVIS(nn.Module):
         Harmonizes prototype representations with the inference feature distribution.
         Uses query chunking to guarantee bounded VRAM (<300MB) even with thousands of queries.
         """
+        if not self.use_attention:
+            # Ablation: replayed prototypes reach the classifier exactly as live features do (no fusion).
+            return F.normalize(current_features, p=2, dim=-1)
+
         if memories is None:
             memories = self.memory_bank.get_all_populated_memories()
+
+        # Fixed 2026-10-25. Callers hand this method unit-norm prototypes, but the attention and the
+        # fusion gate were trained on live encoder features, which leave a LayerNorm at length
+        # ~sqrt(D). Feeding the gate a query ~22x shorter than it expects changes the gate it
+        # produces, and once the retrieval path stopped being suppressed (see the reconstruction
+        # loss in MAVISTrainer) the retrieved branch would have swamped the query outright. Put the
+        # query on the scale the gate was trained for.
+        current_features = F.normalize(current_features, p=2, dim=-1) * (self.feature_dim ** 0.5)
 
         batch_size = current_features.size(0)
         if batch_size > chunk_size:
