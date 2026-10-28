@@ -10,6 +10,7 @@ Aggregates and formats benchmark comparisons across all 4 core configurations:
 
 import os
 import sys
+import glob
 import json
 from typing import Dict, Any
 
@@ -18,9 +19,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def load_result(results_dir: str, filename: str) -> Dict[str, Any]:
-    path = os.path.join(results_dir, "raw", filename)
-    if os.path.exists(path):
-        with open(path, "r") as f:
+    candidates = [
+        os.path.join(results_dir, "raw", filename),
+        os.path.join(results_dir, "raw", "published", filename),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            with open(p, "r") as f:
+                return json.load(f)
+    matches = glob.glob(os.path.join(results_dir, "raw", "**", filename), recursive=True)
+    if matches:
+        with open(matches[0], "r") as f:
             return json.load(f)
     return {}
 

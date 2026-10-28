@@ -115,7 +115,11 @@ PREFIX = {"M1": "baseline", "M2": "ewc", "M3": "mavis_m3", "M4": "mavis", "M4noA
 def load_cells(tag_glob):
     cells = {}
     for cell, prefix in PREFIX.items():
-        files = sorted(glob.glob(os.path.join(RAW, f"{prefix}{tag_glob}_results.json")))
+        pattern = os.path.join(RAW, f"{prefix}{tag_glob}_results.json")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            pattern_rec = os.path.join(RAW, "**", f"{prefix}{tag_glob}_results.json")
+            files = sorted(glob.glob(pattern_rec, recursive=True))
         runs = {}
         for f in files:
             d = json.load(open(f))
@@ -141,6 +145,11 @@ def report_published():
     accs = {}
     for label, (fn, key) in files.items():
         p = os.path.join(RAW, fn)
+        if not os.path.exists(p):
+            p = os.path.join(RAW, "published", fn)
+        if not os.path.exists(p):
+            matches = glob.glob(os.path.join(RAW, "**", fn), recursive=True)
+            p = matches[0] if matches else p
         if not os.path.exists(p):
             continue
         m = json.load(open(p))[key]
