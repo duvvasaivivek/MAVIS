@@ -635,3 +635,76 @@ makes the shared setting explicit. Direction of the result is still not predicta
 collapse fix B prevents may have been the optimiser correctly switching off a retrieval path that
 does not help, and 0.0 vs 0.5 dropout on a 45.5M-parameter encoder seeing 10,000 images per task
 is an empirical question, not a known improvement.
+
+### 2026-10-28 - IEEE manuscript and extended research controls
+
+The nine-page IEEE two-column draft is in `output/pdf/MAVIS_IEEE.pdf`; editable
+LaTeX, 15 source result files, metric/figure generation, research code and manifests
+are in `output/pdf/MAVIS_IEEE_source.zip`. Four author names and email addresses
+were supplied and included. Affiliations remain unspecified.
+
+The paper analyzes the later `results/raw/phase5_factorial/` width-128, ten-task,
+50-epoch, seeds 1/2/3 evidence, not the older preliminary runs discussed above.
+Original files and archived duplicates are distinguished. Historical source hashes
+are unavailable, so exact historical-code equivalence is expressly not certified.
+M3 has the strongest saved final accuracy (24.32%); adding EWC lowers it to 22.23%.
+These results do not establish beneficial EWC synergy or exemplar-free learning.
+
+New controls preserve existing default behavior: full/budget/no historical refresh,
+M3 without attention, direct replay, three separate geometry switches, and serial
+per-example empirical importance estimation. A deterministic training holdout
+supports prospective tuning without using the official labeled validation split.
+`experiments/run_extended.py` previews 33 default jobs and trains only with
+`--execute`; fresh runs have source/configuration/class-order/split manifests,
+timing and resource records, and cannot overwrite an existing cell directory.
+
+Validation passed: nine existing review checks, the hierarchical identity check,
+four decode-cache checks, and seven new tests including a synthetic two-task
+train/evaluate/checkpoint test. Synthetic accuracy is not benchmark evidence.
+The local random-weight forward-only RTX 4050 Laptop GPU profile measured median
+batch latency 14.83 ms (batch 1) and 22.04 ms (batch 8). It excludes data transfer,
+hierarchical scoring and training; the paper states these limits explicitly.
+
+Full extended benchmark training, lambda selection, external baselines, a second
+dataset and utility-conditioned consolidation remain pending. They are described
+as prospective experiments, not completed scientific results. See the source
+package's `EXTENDED_EXPERIMENTS.txt` for exact commands and evidence boundaries.
+
+### 2026-10-28 - Opening-page and color revision
+
+Rebuilt the manuscript opening at the author's request: full title and subtitle,
+all four authors, a full-width problem-first abstract, keywords, and a complete
+introduction on page one. The second column begins at the system-overview
+subsection rather than in the middle of a paragraph. Added restrained navy
+headings, teal key terms and highlights, amber findings, and a colored architecture
+diagram. Retained the IEEEtran two-column body and all numerical evidence.
+The source README identifies the full-width abstract and color as reading-edition
+customizations. Rebuilt the PDF and source ZIP, verified original result hashes
+and all author details, checked references, and visually reviewed all nine pages.
+First-page preview: `output/pdf/MAVIS_First_Page.png`.
+
+### 2026-10-28 - Formal IEEE presentation and additional evidence figures
+
+Restored standard IEEEtran front matter, black body text and headings, and normal
+two-column abstract/keywords. Removed the colored title, subtitle, full-width
+abstract, decorative rule and text highlighting at the author's request for a
+formal research-paper appearance. The first right-hand column begins at a
+subsection boundary. Color remains confined to scientific figures.
+
+Added three vector figures: the task-boundary training/refresh procedure, mean
+task-accuracy heatmaps for M1/M3/M4, and paired seed-level EWC/retrieval differences
+with confidence intervals. Numerical graphics use the existing saved results;
+the procedure diagram is explicitly a schematic. The paper now has ten pages,
+six figures, six tables and 17 references. All ten pages were rendered and visually
+reviewed; source evidence hashes, author details and citations were checked.
+Updated the PDF, first-page preview, editable ZIP and regeneration instructions.
+
+### 2026-10-28 - Reverted optional research code at the author's request
+
+Restored config.py, continual/ewc.py, continual/mavis_trainer.py,
+data/tiny_imagenet.py, models/mavis.py and models/memory.py to HEAD c070833.
+Removed the added exemplar buffer, research split, extended runner, profiler and
+extended-control test from the working project. Verified no differences from HEAD
+remain in those six tracked code files. Existing checkpoints and saved results
+were not changed. Paper artifacts, including their archived research-code snapshot,
+were preserved; that snapshot is not the active working-project implementation.
